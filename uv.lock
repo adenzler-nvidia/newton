@@ -4416,17 +4416,17 @@ wheels = [
 
 [[package]]
 name = "warp-lang"
-version = "1.12.0.dev20260120"
+version = "1.12.0.dev20260125"
 source = { registry = "https://pypi.nvidia.com/" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 wheels = [
-    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.12.0.dev20260120-py3-none-macosx_11_0_arm64.whl", hash = "sha256:794c473a22bbd0bc679b6a3cebcabb22d97453dbc474fe4c8596e181429efdf0" },
-    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.12.0.dev20260120-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:7603df8124ef1abe66eab3fbc2fb4efd15297dc7f8c93809def60c22a5b75c2d" },
-    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.12.0.dev20260120-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:41be8f76847078d73d47ea89fc9fa2de6db3cfafb6a8e067eb46571305d7a652" },
-    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.12.0.dev20260120-py3-none-win_amd64.whl", hash = "sha256:3ad21d57dfa792b0c19d7a9d17b038908ea01f203912f5d60336e38d42ce734c" },
+    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.12.0.dev20260125-py3-none-macosx_11_0_arm64.whl", hash = "sha256:a0167223ef7861c598dd9b76579cf0e25c3fb3c556bd30ce36658088ae45a057" },
+    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.12.0.dev20260125-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:fbf1a8e6fa97c85d1ce6481c8340fca2291b270824fc1fbdc82b412d37b09fad" },
+    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.12.0.dev20260125-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:e232504bcfe5ab18ce8c0cbcb2d31fe3a1b9794c0f240febef175f8f33f90cdb" },
+    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.12.0.dev20260125-py3-none-win_amd64.whl", hash = "sha256:02edc2168c982ebe75274f6e7975d48cafa08f51e89c02fd961bf7ee589312e4" },
 ]
 
 [[package]]
