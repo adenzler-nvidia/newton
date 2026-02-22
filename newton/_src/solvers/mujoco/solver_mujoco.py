@@ -2313,6 +2313,7 @@ class SolverMuJoCo(SolverBase):
         actlimited_arr = (
             mujoco_attrs.actuator_actlimited.numpy() if hasattr(mujoco_attrs, "actuator_actlimited") else None
         )
+        dampratio_arr = mujoco_attrs.actuator_dampratio.numpy() if hasattr(mujoco_attrs, "actuator_dampratio") else None
 
         for mujoco_act_idx in range(mujoco_actuator_count):
             # Skip JOINT_TARGET actuators - they're already added via joint_act_mode path
@@ -2444,9 +2445,7 @@ class SolverMuJoCo(SolverBase):
             # from dampratio via mj_setConst (kd = dampratio * 2 * sqrt(kp * acc0)).
             shortcut = None  # "position" or "velocity" if detected
             shortcut_args: dict[str, float] = {}
-            dampratio = 0.0
-            if hasattr(mujoco_attrs, "actuator_dampratio"):
-                dampratio = float(mujoco_attrs.actuator_dampratio.numpy()[mujoco_act_idx])
+            dampratio = float(dampratio_arr[mujoco_act_idx]) if dampratio_arr is not None else 0.0
             if general_args.get("biastype") == mujoco.mjtBias.mjBIAS_AFFINE and general_args.get("gainprm", [0])[0] > 0:
                 kp = general_args["gainprm"][0]
                 bp = general_args.get("biasprm", [0, 0, 0])
@@ -2483,6 +2482,13 @@ class SolverMuJoCo(SolverBase):
                 act.set_to_position(**shortcut_args)
             elif shortcut == "velocity":
                 act.set_to_velocity(**shortcut_args)
+            elif dampratio > 0:
+                if wp.config.verbose:
+                    print(
+                        f"Warning: actuator {mujoco_act_idx} has dampratio={dampratio} "
+                        f"but does not match position/velocity shortcut pattern. "
+                        f"dampratio will be ignored."
+                    )
             # CTRL_DIRECT actuators - store MJCF-order index into control.mujoco.ctrl
             # mujoco_act_idx is the index in Newton's mujoco:actuator frequency (MJCF order)
             mjc_actuator_ctrl_source_list.append(1)  # CTRL_DIRECT
@@ -4469,12 +4475,7 @@ class SolverMuJoCo(SolverBase):
                     if custom_arr is None:
                         continue
                     compiled = getattr(self.mj_model, field)  # (nu, 10)
-                    nu = compiled.shape[0]
-                    custom_np = custom_arr.numpy()  # (nu * nworld, 10)
-                    nw = custom_np.shape[0] // nu if nu > 0 else 1
-                    for w in range(nw):
-                        custom_np[w * nu : (w + 1) * nu] = compiled
-                    custom_arr.assign(wp.array(custom_np, dtype=custom_arr.dtype))
+                    custom_arr.assign(wp.array(compiled.astype(np.float32), dtype=custom_arr.dtype))
 
             # patch mjw_model with mesh_pos if it doesn't have it
             if not hasattr(self.mjw_model, "mesh_pos"):
