@@ -2904,6 +2904,8 @@ class TestMenagerie_UnitreeH1(TestMenagerieMJCF):
     """Unitree H1 humanoid."""
 
     robot_folder = "unitree_h1"
+    backfill_model = True
+    num_steps = 20
 
 
 class TestMenagerie_UnitreeH1_USD(TestMenagerieUSD):
