@@ -2862,6 +2862,7 @@ class TestMenagerie_UnitreeG1(TestMenagerieMJCF):
     backfill_model = True
     use_cuda_graph = True
     num_steps = 100
+    control_strategy = ZeroControlStrategy()
     compare_fields: ClassVar[list[str]] = [
         "qpos",
         "qvel",
@@ -2883,13 +2884,6 @@ class TestMenagerie_UnitreeG1(TestMenagerieMJCF):
         "actuator_velocity": 5e-1,
     }
     model_skip_fields = DEFAULT_MODEL_SKIP_FIELDS | {
-        # Newton doesn't parse inheritrange/ctrllimited/forcelimited from MJCF shortcuts
-        "actuator_ctrllimited",
-        "actuator_ctrlrange",
-        "actuator_forcelimited",
-        "actuator_forcerange",
-        "actuator_actlimited",
-        "actuator_actrange",
         # Mesh dedup: Newton creates one mesh per geom, MuJoCo deduplicates
         "nmesh",
         "nmeshvert",
