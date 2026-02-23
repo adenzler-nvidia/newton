@@ -530,6 +530,103 @@ DEFAULT_MODEL_SKIP_FIELDS: set[str] = {
 }
 
 
+def compare_compiled_model_fields(
+    newton_mjw: Any,
+    native_mjw: Any,
+    fields: list[str] | None = None,
+    tol: float = 1e-3,
+) -> None:
+    """Compare model fields that depend on compilation (mj_setConst).
+
+    These fields (invweight0, body_pos, body_quat, etc.) may have small
+    numerical differences between Newton's and MuJoCo's model compilation.
+    A 1e-3 tolerance catches real parser bugs while allowing expected
+    compilation differences.
+
+    Fields already validated by compare_inertia_tensors (body_inertia,
+    body_iquat) are skipped.
+
+    Args:
+        newton_mjw: Newton's MjWarpModel
+        native_mjw: Native MuJoCo's MjWarpModel
+        fields: Field names to compare (defaults to MODEL_BACKFILL_FIELDS)
+        tol: Maximum allowed absolute difference (default 1e-3)
+    """
+    if fields is None:
+        fields = MODEL_BACKFILL_FIELDS
+
+    # Validated by compare_inertia_tensors() with physics-equivalence check
+    skip_fields = {"body_inertia", "body_iquat"}
+
+    for field in fields:
+        if field in skip_fields:
+            continue
+
+        native_arr = getattr(native_mjw, field, None)
+        newton_arr = getattr(newton_mjw, field, None)
+
+        if native_arr is None or newton_arr is None:
+            continue
+        if not hasattr(native_arr, "numpy") or not hasattr(newton_arr, "numpy"):
+            continue
+
+        assert native_arr.shape == newton_arr.shape, (
+            f"Compiled field '{field}' shape mismatch: {newton_arr.shape} vs {native_arr.shape}"
+        )
+
+        diff = float(np.max(np.abs(native_arr.numpy().astype(float) - newton_arr.numpy().astype(float))))
+        assert diff <= tol, (
+            f"Compiled field '{field}' has diff {diff:.6e} > tol {tol:.0e}. "
+            f"This likely indicates a parser bug, not a compilation difference."
+        )
+
+
+def compare_models(
+    newton_mjw: Any,
+    native_mjw: Any,
+    skip_fields: set[str] | None = None,
+    backfill_fields: list[str] | None = None,
+) -> None:
+    """Run all model comparison checks between Newton and native MuJoCo models.
+
+    Consolidates the full suite of structural, physical, and compiled-field
+    comparisons into a single entry point.
+    """
+    if skip_fields is None:
+        skip_fields = set()
+
+    compare_mjw_models(newton_mjw, native_mjw, skip_fields=skip_fields)
+
+    if not any("compare_inertia" in s for s in skip_fields):
+        compare_inertia_tensors(newton_mjw, native_mjw)
+
+    for solref_field in [
+        "dof_solref",
+        "eq_solref",
+        "geom_solref",
+        "jnt_solref",
+        "pair_solref",
+        "pair_solreffriction",
+        "tendon_solref_fri",
+        "tendon_solref_lim",
+    ]:
+        if any(s in solref_field for s in skip_fields):
+            continue
+        if hasattr(newton_mjw, solref_field) and hasattr(native_mjw, solref_field):
+            newton_arr = getattr(newton_mjw, solref_field)
+            native_arr = getattr(native_mjw, solref_field)
+            if newton_arr is not None and native_arr is not None:
+                if hasattr(newton_arr, "shape") and newton_arr.shape == native_arr.shape and newton_arr.shape[0] > 0:
+                    compare_solref_physics(newton_mjw, native_mjw, solref_field)
+
+    if newton_mjw.ngeom == native_mjw.ngeom:
+        compare_geom_fields_unordered(newton_mjw, native_mjw, skip_fields=skip_fields)
+
+    compare_jnt_range(newton_mjw, native_mjw)
+
+    compare_compiled_model_fields(newton_mjw, native_mjw, backfill_fields)
+
+
 def compare_inertia_tensors(
     newton_mjw: Any,
     native_mjw: Any,
@@ -1974,46 +2071,12 @@ class TestMenagerieBase(unittest.TestCase):
         # TODO: Remove this workaround once Newton's MJCF parser supports timestep extraction
         dt = float(mj_model.opt.timestep)
 
-        # Compare mjw_model structures
-        compare_mjw_models(newton_solver.mjw_model, native_mjw_model, skip_fields=self.model_skip_fields)
-
-        # Compare reconstructed inertia tensors (principal + iquat -> full 3x3)
-        # The eig3 determinant fix ensures these match even if iquat orientation differs
-        if not any("compare_inertia" in s for s in self.model_skip_fields):
-            compare_inertia_tensors(newton_solver.mjw_model, native_mjw_model)
-
-        # Compare solref fields by physics equivalence (direct mode vs standard mode)
-        for solref_field in [
-            "dof_solref",
-            "eq_solref",
-            "geom_solref",
-            "jnt_solref",
-            "pair_solref",
-            "pair_solreffriction",
-            "tendon_solref_fri",
-            "tendon_solref_lim",
-        ]:
-            if any(s in solref_field for s in self.model_skip_fields):
-                continue
-            if hasattr(newton_solver.mjw_model, solref_field) and hasattr(native_mjw_model, solref_field):
-                newton_arr = getattr(newton_solver.mjw_model, solref_field)
-                native_arr = getattr(native_mjw_model, solref_field)
-                # Only compare if both have data and shapes match (geom counts may differ)
-                if newton_arr is not None and native_arr is not None:
-                    if (
-                        hasattr(newton_arr, "shape")
-                        and newton_arr.shape == native_arr.shape
-                        and newton_arr.shape[0] > 0
-                    ):
-                        compare_solref_physics(newton_solver.mjw_model, native_mjw_model, solref_field)
-
-        # Compare geom fields by content (unordered matching by body+type).
-        # Newton's solver may order geoms differently than native MuJoCo.
-        if newton_solver.mjw_model.ngeom == native_mjw_model.ngeom:
-            compare_geom_fields_unordered(newton_solver.mjw_model, native_mjw_model, skip_fields=self.model_skip_fields)
-
-        # Compare joint ranges only for limited joints (unlimited joints may differ in representation)
-        compare_jnt_range(newton_solver.mjw_model, native_mjw_model)
+        compare_models(
+            newton_solver.mjw_model,
+            native_mjw_model,
+            skip_fields=self.model_skip_fields,
+            backfill_fields=self.backfill_fields,
+        )
 
         # Disable sensor_rne_postconstraint on native — Newton doesn't support
         # sensors, so rne_postconstraint would compute cacc/cfrc_int on native
