@@ -524,9 +524,14 @@ DEFAULT_MODEL_SKIP_FIELDS: set[str] = {
     "geom_",
     "pair_geom",  # geom indices depend on geom ordering
     "nxn_",  # broadphase pairs depend on geom ordering
-    # Actuator acc0: derived from mass matrix + actuator moment, differs due to
-    # inertia re-diagonalization float32 round-trip
+    # Compilation-dependent fields: validated at 1e-3 by compare_compiled_model_fields()
+    "body_invweight0",
+    "dof_invweight0",
+    "body_pos",
+    "body_quat",
+    "body_subtreemass",
     "actuator_acc0",
+    "stat",  # meaninertia derived from invweight0
 }
 
 
@@ -1620,7 +1625,6 @@ def backfill_model_from_native(
     newton_mjw: Any,
     native_mjw: Any,
     fields: list[str] | None = None,
-    tol: float = 1e-3,
 ) -> None:
     """Copy computed model fields from native MuJoCo to Newton's mjw_model.
 
@@ -1628,29 +1632,15 @@ def backfill_model_from_native(
     differing from MuJoCo's mj_setConst(). Useful for isolating simulation
     differences from model compilation differences during testing.
 
-    Before copying, each field is verified to be within ``tol`` of the native value.
-    Fields that are expected to have large relative differences (body_inertia,
-    body_iquat — verified separately via compare_inertia_tensors) are exempt.
-    This catches real parser bugs (e.g. body_pos off by 1.0) while allowing
-    expected small compilation differences (e.g. body_pos off by 3e-8).
+    Validation of these fields is handled by compare_compiled_model_fields().
 
     Args:
         newton_mjw: Newton's MjWarpModel to update
         native_mjw: Native MuJoCo's MjWarpModel to copy from
         fields: List of field names to copy (defaults to MODEL_BACKFILL_FIELDS)
-        tol: Maximum allowed absolute difference before backfill (default 1e-3)
     """
     if fields is None:
         fields = MODEL_BACKFILL_FIELDS
-
-    # Fields verified separately (inertia re-diag gives large but physics-equivalent diffs)
-    skip_verification = {
-        "body_inertia",
-        "body_iquat",
-        "body_invweight0",
-        "dof_invweight0",
-        "actuator_acc0",
-    }
 
     for field in fields:
         native_arr = getattr(native_mjw, field, None)
@@ -1661,15 +1651,7 @@ def backfill_model_from_native(
         if not hasattr(native_arr, "numpy") or not hasattr(newton_arr, "numpy"):
             continue
 
-        # Only copy if shapes match exactly
         if native_arr.shape == newton_arr.shape:
-            # Verify diff is within tolerance (catch parser bugs)
-            if field not in skip_verification:
-                diff = float(np.max(np.abs(native_arr.numpy().astype(float) - newton_arr.numpy().astype(float))))
-                assert diff <= tol, (
-                    f"Backfill field '{field}' has diff {diff:.6e} > tol {tol:.0e}. "
-                    f"This likely indicates a parser bug, not a compilation difference."
-                )
             newton_arr.assign(native_arr)
 
     wp.synchronize()
@@ -2855,13 +2837,10 @@ class TestMenagerie_ApptronikApollo(TestMenagerieMJCF):
         "actuator_length": 5e-4,
         "actuator_velocity": 2e-2,
     }
+    # Apollo has 44 mesh assets but many geoms share the same mesh. Without
+    # include_mesh_materials dedup, Newton creates 60 meshes (one per geom).
+    # Also, trimesh deduplicates vertices on load, changing per-mesh counts.
     model_skip_fields = DEFAULT_MODEL_SKIP_FIELDS | {
-        "body_invweight0",  # derived from mass matrix factorization; small residual diff (~1.5e-4)
-        "dof_invweight0",
-        "stat",  # meaninertia computed from invweight0
-        # Apollo has 44 mesh assets but many geoms share the same mesh. Without
-        # include_mesh_materials dedup, Newton creates 60 meshes (one per geom).
-        # Also, trimesh deduplicates vertices on load, changing per-mesh counts.
         "nmesh",
         "nmeshvert",
         "nmeshnormal",
@@ -3023,9 +3002,6 @@ class TestMenagerie_UnitreeG1(TestMenagerieMJCF):
         "actuator_velocity": 5e-1,
     }
     model_skip_fields = DEFAULT_MODEL_SKIP_FIELDS | {
-        "body_invweight0",
-        "dof_invweight0",
-        "stat",
         # Newton doesn't parse inheritrange/ctrllimited/forcelimited from MJCF shortcuts
         "actuator_ctrllimited",
         "actuator_ctrlrange",
