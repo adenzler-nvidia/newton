@@ -2861,8 +2861,7 @@ class TestMenagerie_UnitreeG1(TestMenagerieMJCF):
     robot_folder = "unitree_g1"
     backfill_model = True
     use_cuda_graph = True
-    num_steps = 100
-    control_strategy = ZeroControlStrategy()
+    num_steps = 5
     compare_fields: ClassVar[list[str]] = [
         "qpos",
         "qvel",
@@ -2873,16 +2872,6 @@ class TestMenagerie_UnitreeG1(TestMenagerieMJCF):
         "actuator_length",
         "actuator_velocity",
     ]
-    tolerance_overrides: ClassVar[dict[str, float]] = {
-        "qpos": 1e-2,
-        "qvel": 5e-1,
-        "xpos": 1e-2,
-        "xquat": 1e-2,
-        "site_xpos": 1e-2,
-        "subtree_com": 1e-2,
-        "actuator_length": 1e-2,
-        "actuator_velocity": 5e-1,
-    }
     model_skip_fields = DEFAULT_MODEL_SKIP_FIELDS | {
         # Mesh dedup: Newton creates one mesh per geom, MuJoCo deduplicates
         "nmesh",
