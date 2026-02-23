@@ -1425,13 +1425,15 @@ def parse_mjcf(
             joint_label = f"{body_label_path}/{joint_label_name}"
             if joint_type == JointType.FREE:
                 assert parent == -1, "Free joints must have the world body as parent"
-                joint_indices.append(
-                    builder.add_joint_free(
-                        link,
-                        label=joint_label,
-                        custom_attributes=joint_custom_attributes,
-                    )
+                joint_idx = builder.add_joint_free(
+                    link,
+                    label=joint_label,
+                    custom_attributes=joint_custom_attributes,
                 )
+                joint_indices.append(joint_idx)
+                # Map free joint names so actuators can target them
+                for jn in joint_name:
+                    joint_name_to_idx[jn] = joint_idx
             else:
                 # When parent is world (-1), use world_xform to respect the xform argument
                 if parent == -1:
@@ -2287,12 +2289,14 @@ def parse_mjcf(
                 kv = parse_float(merged_attrib, "kv", 0.0)  # Optional velocity damping
                 gainprm = vec10(kp, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
                 biasprm = vec10(0.0, -kp, -kv, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-                # Resolve inheritrange: copy target joint's range to ctrlrange
+                # Resolve inheritrange: copy target joint's range to ctrlrange.
+                # Uses only the first DOF (qd_start) since inheritrange is only
+                # meaningful for single-DOF joints (hinge, slide).
                 inheritrange = parse_float(merged_attrib, "inheritrange", 0.0)
                 if inheritrange > 0 and joint_name and qd_start >= 0:
                     lower = builder.joint_limit_lower[qd_start]
                     upper = builder.joint_limit_upper[qd_start]
-                    if lower != upper:
+                    if lower < upper:
                         mean = (upper + lower) / 2.0
                         radius = (upper - lower) / 2.0 * inheritrange
                         merged_attrib["ctrlrange"] = f"{mean - radius} {mean + radius}"
