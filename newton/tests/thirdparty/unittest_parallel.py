@@ -240,6 +240,7 @@ def main(argv=None):
         "apptronik_apollo",
         "unitree_g1",
         "unitree_h1",
+        "booster_t1",
         "leap_hand",
         "wonik_allegro",
         "robotiq_2f85",

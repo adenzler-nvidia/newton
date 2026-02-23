@@ -2759,8 +2759,9 @@ class TestMenagerie_BoosterT1(TestMenagerieMJCF):
     """Booster Robotics T1 humanoid."""
 
     robot_folder = "booster_t1"
-
-    skip_reason = "Not yet verified"
+    backfill_model = True
+    control_strategy = StructuredControlStrategy(seed=42)
+    num_steps = 0
 
 
 class TestMenagerie_BoosterT1_USD(TestMenagerieUSD):
