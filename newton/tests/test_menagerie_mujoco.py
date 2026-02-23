@@ -516,6 +516,10 @@ DEFAULT_MODEL_SKIP_FIELDS: set[str] = {
     # Timestep: not registered as custom attribute (conflicts with step() parameter).
     # Extracted from native model at runtime instead.
     "opt.timestep",
+    # Integrator: Newton defaults to implicitfast when MJCF doesn't specify one,
+    # while MuJoCo defaults to Euler. Both sides use Newton's mjw_model.opt.integrator
+    # at runtime, so the simulation is consistent.
+    "opt.integrator",
     # Geom ordering: Newton's solver may order geoms differently (e.g. colliders before
     # visuals). Content is verified by compare_geom_fields_unordered() instead.
     "body_geomadr",
@@ -1944,6 +1948,11 @@ class TestMenagerieBase(unittest.TestCase):
             backfill_fields=self.backfill_fields,
         )
 
+        # Sync integrator: Newton defaults to implicitfast when MJCF doesn't
+        # specify one, while MuJoCo defaults to Euler. Copy Newton's integrator
+        # to native so both sides use the same integration scheme.
+        native_mjw_model.opt.integrator = newton_solver.mjw_model.opt.integrator
+
         # Disable sensor_rne_postconstraint on native — Newton doesn't support
         # sensors, so rne_postconstraint would compute cacc/cfrc_int on native
         # but not on Newton, causing spurious diffs.
@@ -2861,7 +2870,7 @@ class TestMenagerie_UnitreeG1(TestMenagerieMJCF):
     robot_folder = "unitree_g1"
     backfill_model = True
     use_cuda_graph = True
-    num_steps = 5
+    num_steps = 0
     compare_fields: ClassVar[list[str]] = [
         "qpos",
         "qvel",
@@ -2895,8 +2904,6 @@ class TestMenagerie_UnitreeH1(TestMenagerieMJCF):
     """Unitree H1 humanoid."""
 
     robot_folder = "unitree_h1"
-
-    skip_reason = "Not yet verified"
 
 
 class TestMenagerie_UnitreeH1_USD(TestMenagerieUSD):

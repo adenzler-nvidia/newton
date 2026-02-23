@@ -238,6 +238,8 @@ def main(argv=None):
     menagerie_folders = [
         "universal_robots_ur5e",
         "apptronik_apollo",
+        "unitree_g1",
+        "unitree_h1",
         "leap_hand",
         "wonik_allegro",
         "robotiq_2f85",
