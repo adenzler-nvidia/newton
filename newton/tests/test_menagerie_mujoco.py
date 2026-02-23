@@ -2410,10 +2410,6 @@ class TestMenagerie_UniversalRobotsUr5e(TestMenagerieMJCF):
     num_worlds = 34
     num_steps = 500
 
-    # Backfill eliminates model compilation differences (inertia re-diagonalization).
-    # Contact injection bypasses non-deterministic contact ordering in broadphase.
-    # Constraint injection bypasses non-deterministic efc row ordering in make_constraint.
-    # Together these give bit-identical results, so no tolerance overrides needed.
     backfill_model = True
     use_split_pipeline = True
 
@@ -2699,7 +2695,6 @@ class TestMenagerie_ApptronikApollo(TestMenagerieMJCF):
     robot_folder = "apptronik_apollo"
     control_strategy = StructuredControlStrategy(seed=42)
     backfill_model = True
-    use_cuda_graph = True
     num_steps = 100
     njmax = 128  # initial 63 constraints may grow during stepping
     discard_visual = False
@@ -2869,7 +2864,7 @@ class TestMenagerie_UnitreeG1(TestMenagerieMJCF):
 
     robot_folder = "unitree_g1"
     backfill_model = True
-    use_cuda_graph = True
+    control_strategy = StructuredControlStrategy(seed=42)
     num_steps = 0
     compare_fields: ClassVar[list[str]] = [
         "qpos",
@@ -2905,6 +2900,7 @@ class TestMenagerie_UnitreeH1(TestMenagerieMJCF):
 
     robot_folder = "unitree_h1"
     backfill_model = True
+    control_strategy = StructuredControlStrategy(seed=42)
     num_steps = 20
 
 
