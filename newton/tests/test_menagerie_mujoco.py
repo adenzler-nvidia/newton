@@ -2192,6 +2192,11 @@ class TestMenagerieBase(unittest.TestCase):
         newton_graph = None
         native_graph = None
 
+        # Print initial state diff in debug mode
+        if self.debug_visual:
+            print("Initial state:")
+            print_mjdata_diff(newton_solver.mjw_data, native_mjw_data, self.compare_fields, self.tolerances, -1)
+
         # Main simulation loop
         max_steps = 500 if self.debug_visual else self.num_steps
 
