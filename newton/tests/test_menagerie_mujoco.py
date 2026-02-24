@@ -1929,6 +1929,7 @@ class TestMenagerieBase(unittest.TestCase):
             skip_visual_only_geoms=not self.parse_visuals,
             njmax=self.njmax,
             nconmax=self.nconmax,
+            integrator=getattr(self, "solver_integrator", None),
         )
 
         mj_model, mj_data_native, native_mjw_model, native_mjw_data = self._create_native_mujoco_warp()
@@ -2472,7 +2473,12 @@ class TestMenagerie_Robotiq2f85V4(TestMenagerieMJCF):
 
     robot_folder = "robotiq_2f85_v4"
 
-    skip_reason = "Not yet verified"
+    # Use Euler integrator since this model uses fluid (viscosity > 0)
+    # and mujoco_warp doesn't support implicit integrators with fluid model
+    solver_integrator = "euler"
+
+    # Skip eq_objtype - Newton and MuJoCo may represent equality constraint object types differently
+    model_skip_fields: ClassVar[set[str]] = {"eq_objtype"}
 
 
 class TestMenagerie_Robotiq2f85V4_USD(TestMenagerieUSD):
