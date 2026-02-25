@@ -258,6 +258,35 @@ class TestImportMjcfBasic(unittest.TestCase):
         # So [0.7071068, 0, 0, 0.7071068] becomes [0, 0, 0.7071068, 0.7071068]
         np.testing.assert_allclose(body_quat, [0, 0, 0.7071068, 0.7071068], atol=1e-6)
 
+    def test_site_euler_sequence_matches_mujoco(self):
+        """Non-default compiler eulerseq should match MuJoCo site orientation."""
+        import mujoco
+
+        mjcf_content = """<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="test">
+    <compiler angle="radian" eulerseq="zyx"/>
+    <worldbody>
+        <body name="test_body">
+            <site name="test_site" euler="0.3 -1.2 0.7" size="0.01"/>
+        </body>
+    </worldbody>
+</mujoco>"""
+
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf_content, parse_sites=True)
+
+        site_indices = [i for i, flags in enumerate(builder.shape_flags) if flags & ShapeFlags.SITE]
+        self.assertEqual(len(site_indices), 1, "Expected exactly one parsed site shape")
+        site_idx = site_indices[0]
+        newton_xyzw = np.array(builder.shape_transform[site_idx][3:7], dtype=np.float64)
+
+        native_wxyz = np.array(mujoco.MjModel.from_xml_string(mjcf_content).site_quat[0], dtype=np.float64)
+        native_xyzw = np.array([native_wxyz[1], native_wxyz[2], native_wxyz[3], native_wxyz[0]], dtype=np.float64)
+
+        same = np.allclose(newton_xyzw, native_xyzw, rtol=1e-6, atol=1e-6)
+        negated = np.allclose(newton_xyzw, -native_xyzw, rtol=1e-6, atol=1e-6)
+        self.assertTrue(same or negated, "Site quaternion mismatch (accounting for q/-q equivalence)")
+
     def test_root_body_with_custom_xform(self):
         """Test 1: Root body with custom xform parameter (with rotation) → verify transform is properly applied."""
         # Add a 45-degree rotation around Z to the body
@@ -396,6 +425,68 @@ class TestImportMjcfBasic(unittest.TestCase):
         body_quat = body_q[body_idx, 3:]
         np.testing.assert_allclose(joint_pos, body_pos, atol=1e-6)
         np.testing.assert_allclose(joint_quat, body_quat, atol=1e-6)
+
+    def test_floating_base_with_import_xform_is_relative(self):
+        """Test that xform composes with (does not overwrite) a floating root body's local transform."""
+        local_pos = wp.vec3(1.0, 2.0, 3.0)
+        local_quat = wp.quat_rpy(0.3, -0.4, 0.2)
+        # MJCF expects quaternions as [w, x, y, z].
+        local_quat_mjcf = f"{local_quat[3]} {local_quat[0]} {local_quat[1]} {local_quat[2]}"
+
+        mjcf_content = f"""<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="floating_with_xform">
+    <worldbody>
+        <body name="floating_body" pos="{local_pos[0]} {local_pos[1]} {local_pos[2]}" quat="{local_quat_mjcf}">
+            <freejoint/>
+            <geom type="sphere" size="0.1"/>
+        </body>
+    </worldbody>
+</mujoco>"""
+
+        import_pos = wp.vec3(4.0, -5.0, 6.0)
+        import_quat = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 3.0)
+        import_xform = wp.transform(import_pos, import_quat)
+
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf_content, xform=import_xform)
+        model = builder.finalize()
+
+        local_xform = wp.transform(local_pos, local_quat)
+        expected_xform = import_xform * local_xform
+        expected_pos = np.array([expected_xform.p[0], expected_xform.p[1], expected_xform.p[2]])
+        expected_quat = np.array([expected_xform.q[0], expected_xform.q[1], expected_xform.q[2], expected_xform.q[3]])
+
+        body_idx = model.body_label.index("floating_with_xform/worldbody/floating_body")
+        body_q = model.body_q.numpy()[body_idx]
+        body_pos = body_q[:3]
+        body_quat = body_q[3:7]
+
+        np.testing.assert_allclose(body_pos, expected_pos, atol=1e-6)
+        body_quat_match = np.allclose(body_quat, expected_quat, atol=1e-6) or np.allclose(
+            body_quat, -expected_quat, atol=1e-6
+        )
+        self.assertTrue(body_quat_match, f"Body quaternion does not match composed transform. Got {body_quat}")
+
+        # Guard against overwrite behavior: final pose should not equal raw import xform pose.
+        self.assertFalse(
+            np.allclose(body_pos, [import_pos[0], import_pos[1], import_pos[2]], atol=1e-6),
+            "Body position unexpectedly equals raw import xform position (overwrite behavior).",
+        )
+
+        joint_idx = model.joint_label.index("floating_with_xform/worldbody/floating_body/floating_body_freejoint")
+        joint_q_start = model.joint_q_start.numpy()
+        joint_q = model.joint_q.numpy()
+        joint_start = joint_q_start[joint_idx]
+        joint_pos = np.array([joint_q[joint_start + 0], joint_q[joint_start + 1], joint_q[joint_start + 2]])
+        joint_quat = np.array(
+            [joint_q[joint_start + 3], joint_q[joint_start + 4], joint_q[joint_start + 5], joint_q[joint_start + 6]]
+        )
+
+        np.testing.assert_allclose(joint_pos, expected_pos, atol=1e-6)
+        joint_quat_match = np.allclose(joint_quat, expected_quat, atol=1e-6) or np.allclose(
+            joint_quat, -expected_quat, atol=1e-6
+        )
+        self.assertTrue(joint_quat_match, f"Joint quaternion does not match composed transform. Got {joint_quat}")
 
     def test_chain_with_rotations(self):
         """Test 3: Chain of bodies with different pos/quat → verify each body's world transform."""
