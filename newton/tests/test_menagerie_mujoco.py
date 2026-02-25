@@ -2533,8 +2533,29 @@ class TestMenagerie_ShadowHand(TestMenagerieMJCF):
     """Shadow Hand."""
 
     robot_folder = "shadow_hand"
-
-    skip_reason = "Not yet verified"
+    robot_xml = "scene_left.xml"
+    # Mesh: Newton creates one mesh per geom, MuJoCo deduplicates shared meshes.
+    model_skip_fields: ClassVar[set[str]] = DEFAULT_MODEL_SKIP_FIELDS | {
+        "nmesh",
+        "nmeshvert",
+        "nmeshnormal",
+        "nmeshpoly",
+        "nmeshface",
+        "nmeshpolyvert",
+        "nmeshpolymap",
+        "nmeshgraph",
+        "mesh_",
+        "nmaxpolygon",
+        "nmaxmeshdeg",
+    }
+    # Float32 compilation noise on invweight0 and actuator_acc0 (max diff ~3e-3,
+    # reldiff <1e-6) exceeds 1e-3 absolute tolerance across finger bodies.
+    compiled_compare_fields: ClassVar[list[str]] = [
+        "body_pos",
+        "body_quat",
+        "body_subtreemass",
+    ]
+    num_steps = 0
 
 
 class TestMenagerie_ShadowHand_USD(TestMenagerieUSD):
