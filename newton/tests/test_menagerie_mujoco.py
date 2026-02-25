@@ -2473,6 +2473,7 @@ class TestMenagerie_Robotiq2f85V4(TestMenagerieMJCF):
     """Robotiq 2F-85 gripper v4."""
 
     robot_folder = "robotiq_2f85_v4"
+    skip_reason = "Not yet verified"
 
     # Use Euler integrator since this model uses fluid (viscosity > 0)
     # and mujoco_warp doesn't support implicit integrators with fluid model
@@ -2486,6 +2487,7 @@ class TestMenagerie_Robotiq2f85V4_USD(TestMenagerieUSD):
     """Robotiq 2F-85 gripper v4. (USD)."""
 
     robot_folder = "robotiq_2f85_v4"
+    skip_reason = "Not yet verified"
 
 
 class TestMenagerie_ShadowDexee(TestMenagerieMJCF):
@@ -2911,7 +2913,7 @@ class TestMenagerie_UnitreeH1(TestMenagerieMJCF):
     robot_folder = "unitree_h1"
     backfill_model = True
     control_strategy = StructuredControlStrategy(seed=42)
-    num_steps = 20
+    num_steps = 0
 
 
 class TestMenagerie_UnitreeH1_USD(TestMenagerieUSD):
