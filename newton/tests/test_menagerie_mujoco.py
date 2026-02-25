@@ -2473,21 +2473,34 @@ class TestMenagerie_Robotiq2f85V4(TestMenagerieMJCF):
     """Robotiq 2F-85 gripper v4."""
 
     robot_folder = "robotiq_2f85_v4"
-    skip_reason = "Not yet verified"
+    num_steps = 0
 
     # Use Euler integrator since this model uses fluid (viscosity > 0)
     # and mujoco_warp doesn't support implicit integrators with fluid model
     solver_integrator = "euler"
 
-    # Skip eq_objtype - Newton and MuJoCo may represent equality constraint object types differently
-    model_skip_fields: ClassVar[set[str]] = {"eq_objtype"}
+    # Skip eq_objtype - Newton and MuJoCo may represent equality constraint object types differently.
+    # Mesh: Newton creates one mesh per geom, native deduplicates differently.
+    model_skip_fields: ClassVar[set[str]] = DEFAULT_MODEL_SKIP_FIELDS | {
+        "eq_objtype",
+        "nmesh",
+        "nmeshvert",
+        "nmeshnormal",
+        "nmeshface",
+        "nmeshpoly",
+        "nmeshpolyvert",
+        "nmeshpolymap",
+        "nmeshgraph",
+        "mesh_",
+        "nmaxpolygon",
+        "nmaxmeshdeg",
+    }
 
 
 class TestMenagerie_Robotiq2f85V4_USD(TestMenagerieUSD):
     """Robotiq 2F-85 gripper v4. (USD)."""
 
     robot_folder = "robotiq_2f85_v4"
-    skip_reason = "Not yet verified"
 
 
 class TestMenagerie_ShadowDexee(TestMenagerieMJCF):
