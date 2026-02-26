@@ -2094,6 +2094,73 @@ class TestImportMjcfGeometry(unittest.TestCase):
             msg=f"Visual geom with default density should produce mass={expected_mass}, got {actual_mass}",
         )
 
+    def test_inertial_locks_body_against_frame_geom_mass(self):
+        """Regression: explicit <inertial> must lock body mass/COM against later frame geoms.
+
+        When a body has an explicit <inertial> element, MuJoCo ignores all
+        geom-based mass contributions.  In Newton's MJCF importer, child
+        <frame> elements with geoms are processed *after* <inertial>, so
+        without locking body_lock_inertia, those frame geoms shift body_com
+        away from the correct value.
+        """
+        mjcf_content = """<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="inertial_lock_test">
+    <worldbody>
+        <body name="test_body" pos="0 0 1">
+            <freejoint/>
+            <inertial pos="0.1 0.2 0.3" mass="5.0" diaginertia="0.01 0.02 0.03"/>
+            <geom type="sphere" size="0.05" pos="0 0 0"/>
+            <frame pos="0.5 0.5 0.5">
+                <geom type="box" size="0.1 0.1 0.1"/>
+            </frame>
+        </body>
+    </worldbody>
+</mujoco>
+"""
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf_content, parse_visuals=True)
+        body_idx = next(i for i, label in enumerate(builder.body_label) if label.endswith("test_body"))
+        com = builder.body_com[body_idx]
+        np.testing.assert_allclose(
+            [float(com[0]), float(com[1]), float(com[2])],
+            [0.1, 0.2, 0.3],
+            atol=1e-6,
+            err_msg="body_com must match <inertial> pos, not be shifted by frame geoms",
+        )
+        self.assertAlmostEqual(builder.body_mass[body_idx], 5.0, places=5)
+
+    def test_inertial_locks_body_against_frame_geom_explicit_mass(self):
+        """Regression: explicit <inertial> must also block frame geoms with mass= attributes.
+
+        The explicit-mass code path in parse_shapes calls _update_body_mass
+        directly, so it must also check body_lock_inertia.
+        """
+        mjcf_content = """<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="inertial_lock_explicit_mass_test">
+    <worldbody>
+        <body name="test_body" pos="0 0 1">
+            <freejoint/>
+            <inertial pos="0.1 0.2 0.3" mass="5.0" diaginertia="0.01 0.02 0.03"/>
+            <geom type="sphere" size="0.05" pos="0 0 0"/>
+            <frame pos="0.5 0.5 0.5">
+                <geom type="box" size="0.1 0.1 0.1" mass="2.0"/>
+            </frame>
+        </body>
+    </worldbody>
+</mujoco>
+"""
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf_content, parse_visuals=True)
+        body_idx = next(i for i, label in enumerate(builder.body_label) if label.endswith("test_body"))
+        com = builder.body_com[body_idx]
+        np.testing.assert_allclose(
+            [float(com[0]), float(com[1]), float(com[2])],
+            [0.1, 0.2, 0.3],
+            atol=1e-6,
+            err_msg="body_com must match <inertial> pos, not be shifted by frame geoms with explicit mass",
+        )
+        self.assertAlmostEqual(builder.body_mass[body_idx], 5.0, places=5)
+
 
 class TestImportMjcfSolverParams(unittest.TestCase):
     def test_solimplimit_parsing(self):
@@ -6437,6 +6504,94 @@ class TestActuatorShortcutTypeDefaults(unittest.TestCase):
         compiled = solver.mj_model.actuator_biastype
         # position=affine(1), velocity=affine(1), motor=none(0), general=affine(1)
         np.testing.assert_array_equal(compiled, [1, 1, 0, 1])
+
+
+class TestActuatorDefaultKpKv(unittest.TestCase):
+    """Regression: position/velocity actuators must default kp=1/kv=1.
+
+    MuJoCo defaults kp=1 for position and kv=1 for velocity actuators.
+    Newton previously defaulted both to 0, producing zero biasprm and
+    effectively disabling position/velocity feedback when the MJCF (or
+    class defaults) omitted the kp/kv attribute.
+    """
+
+    def test_position_actuator_default_kp(self):
+        """Position actuator without explicit kp must use kp=1."""
+        mjcf = """<?xml version="1.0" ?>
+<mujoco>
+    <worldbody>
+        <body name="b">
+            <joint name="j" type="hinge" axis="0 1 0"/>
+            <geom type="box" size="0.1 0.1 0.1"/>
+        </body>
+    </worldbody>
+    <actuator>
+        <position name="act" joint="j"/>
+    </actuator>
+</mujoco>
+"""
+        builder = newton.ModelBuilder()
+        SolverMuJoCo.register_custom_attributes(builder)
+        builder.add_mjcf(mjcf, ctrl_direct=True)
+        model = builder.finalize()
+
+        biasprm = model.mujoco.actuator_biasprm.numpy()[0]
+        gainprm = model.mujoco.actuator_gainprm.numpy()[0]
+        self.assertAlmostEqual(gainprm[0], 1.0, places=5, msg="default kp must be 1")
+        self.assertAlmostEqual(biasprm[1], -1.0, places=5, msg="default biasprm[1] must be -kp=-1")
+
+    def test_velocity_actuator_default_kv(self):
+        """Velocity actuator without explicit kv must use kv=1."""
+        mjcf = """<?xml version="1.0" ?>
+<mujoco>
+    <worldbody>
+        <body name="b">
+            <joint name="j" type="hinge" axis="0 1 0"/>
+            <geom type="box" size="0.1 0.1 0.1"/>
+        </body>
+    </worldbody>
+    <actuator>
+        <velocity name="act" joint="j"/>
+    </actuator>
+</mujoco>
+"""
+        builder = newton.ModelBuilder()
+        SolverMuJoCo.register_custom_attributes(builder)
+        builder.add_mjcf(mjcf, ctrl_direct=True)
+        model = builder.finalize()
+
+        biasprm = model.mujoco.actuator_biasprm.numpy()[0]
+        gainprm = model.mujoco.actuator_gainprm.numpy()[0]
+        self.assertAlmostEqual(gainprm[0], 1.0, places=5, msg="default kv must be 1")
+        self.assertAlmostEqual(biasprm[2], -1.0, places=5, msg="default biasprm[2] must be -kv=-1")
+
+    def test_position_actuator_class_without_kp(self):
+        """Position actuator using a class that omits kp must still default to kp=1."""
+        mjcf = """<?xml version="1.0" ?>
+<mujoco>
+    <default>
+        <default class="no_kp">
+            <position ctrlrange="-1 1" forcerange="-5 5"/>
+        </default>
+    </default>
+    <worldbody>
+        <body name="b">
+            <joint name="j" type="hinge" axis="0 1 0"/>
+            <geom type="box" size="0.1 0.1 0.1"/>
+        </body>
+    </worldbody>
+    <actuator>
+        <position name="act" joint="j" class="no_kp"/>
+    </actuator>
+</mujoco>
+"""
+        builder = newton.ModelBuilder()
+        SolverMuJoCo.register_custom_attributes(builder)
+        builder.add_mjcf(mjcf, ctrl_direct=True)
+        model = builder.finalize()
+
+        biasprm = model.mujoco.actuator_biasprm.numpy()[0]
+        self.assertAlmostEqual(biasprm[1], -1.0, places=5, msg="class without kp must still default to -1")
 
 
 class TestMjcfIncludeOptionMerge(unittest.TestCase):
