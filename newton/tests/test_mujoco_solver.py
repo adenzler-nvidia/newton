@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -13,6 +14,7 @@ import warp as wp
 import newton
 from newton import BodyFlags, JointType, Mesh
 from newton._src.core.types import vec5
+from newton._src.usd.schemas import SchemaResolverMjc
 from newton.solvers import SolverMuJoCo, SolverNotifyFlags
 from newton.tests.unittest_utils import USD_AVAILABLE, assert_np_equal
 
@@ -8274,45 +8276,107 @@ class TestEqualityWeldConstraintDefaults(unittest.TestCase):
             os.unlink(xml_path)
 
 
-class TestRegisterCustomAttributesDocstringCoverage(unittest.TestCase):
-    """Verify the register_custom_attributes docstring mentions every registration."""
+class TestMuJoCoDocCoverage(unittest.TestCase):
+    """Machine-verify that mujoco.rst documents every mjc: attribute Newton parses.
 
-    def test_register_custom_attributes_docstring_coverage(self):
-        builder = newton.ModelBuilder()
-        SolverMuJoCo.register_custom_attributes(builder)
+    Three invariants are enforced:
+    1. Every mujoco-namespace custom attribute name appears in the .rst.
+    2. Every mujoco-namespace custom frequency name appears in the .rst.
+    3. Every SchemaResolverMjc mjc: USD attribute name appears in the .rst.
+    """
 
-        docstring = SolverMuJoCo.register_custom_attributes.__doc__
-        self.assertIsNotNone(docstring, "register_custom_attributes must have a docstring")
+    @classmethod
+    def setUpClass(cls):
+        docs_path = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "integrations", "mujoco.rst")
+        with open(docs_path) as f:
+            cls.rst_content = f.read()
 
-        # Collect all mujoco-namespace attribute names
-        missing_attrs = []
-        for _key, attr in builder.custom_attributes.items():
+        cls.builder = newton.ModelBuilder()
+        SolverMuJoCo.register_custom_attributes(cls.builder)
+
+    def _rst_has(self, name: str) -> bool:
+        """Check name appears as a whole token in the .rst (not as a substring)."""
+        pattern = rf"(?<![A-Za-z0-9_:]){re.escape(name)}(?![A-Za-z0-9_:])"
+        return re.search(pattern, self.rst_content) is not None
+
+    def test_all_custom_attribute_names_in_rst(self):
+        """Every registered mujoco custom attribute name must appear in mujoco.rst."""
+        missing = []
+        for _key, attr in self.builder.custom_attributes.items():
             if attr.namespace != "mujoco":
                 continue
-            if attr.name not in docstring:
-                missing_attrs.append(attr.name)
+            if not self._rst_has(attr.name):
+                missing.append(attr.name)
+        self.assertEqual(missing, [], f"Custom attrs missing from mujoco.rst: {missing}")
 
-        self.assertEqual(
-            missing_attrs,
-            [],
-            f"The following custom attributes are registered but not mentioned "
-            f"in the register_custom_attributes docstring: {missing_attrs}",
-        )
-
-        # Collect all mujoco-namespace frequency names
-        missing_freqs = []
-        for key, _freq in builder.custom_frequencies.items():
+    def test_all_custom_frequencies_in_rst(self):
+        """Every registered mujoco custom frequency must appear in mujoco.rst."""
+        missing = []
+        for key in self.builder.custom_frequencies:
             if not key.startswith("mujoco:"):
                 continue
-            if key not in docstring:
-                missing_freqs.append(key)
+            if not self._rst_has(key):
+                missing.append(key)
+        self.assertEqual(missing, [], f"Custom frequencies missing from mujoco.rst: {missing}")
 
-        self.assertEqual(
-            missing_freqs,
-            [],
-            f"The following custom frequencies are registered but not mentioned "
-            f"in the register_custom_attributes docstring: {missing_freqs}",
-        )
+    def test_all_schema_resolver_usd_attrs_in_rst(self):
+        """Every SchemaResolverMjc mjc: USD attr name must appear in mujoco.rst."""
+
+        missing = []
+        seen = set()
+        for prim_type, attrs in SchemaResolverMjc.mapping.items():
+            for newton_name, schema_attr in attrs.items():
+                usd_name = schema_attr.usd_attribute_name
+                if usd_name in seen:
+                    continue
+                seen.add(usd_name)
+                if not self._rst_has(usd_name):
+                    missing.append(f"{prim_type.name}: {usd_name} -> {newton_name}")
+        self.assertEqual(missing, [], f"SchemaResolverMjc attrs missing from mujoco.rst: {missing}")
+
+    def test_all_custom_usd_attribute_names_in_rst(self):
+        """Every custom attribute with a mjc: usd_attribute_name must appear in mujoco.rst."""
+        missing = []
+        for _key, attr in self.builder.custom_attributes.items():
+            if attr.namespace != "mujoco":
+                continue
+            usd_name = getattr(attr, "usd_attribute_name", None)
+            if not usd_name or usd_name == "*":
+                continue
+            if not usd_name.startswith("mjc:"):
+                continue
+            if not self._rst_has(usd_name):
+                missing.append(f"{attr.name} -> {usd_name}")
+        self.assertEqual(missing, [], f"Custom attr USD names missing from mujoco.rst: {missing}")
+
+    def test_no_invented_mjc_names_in_rst(self):
+        """Every mjc: name mentioned in the .rst must exist in either
+        SchemaResolverMjc or register_custom_attributes."""
+
+        # Collect all valid mjc: names from code
+        valid_mjc = set()
+
+        # From SchemaResolverMjc
+        for _prim_type, attrs in SchemaResolverMjc.mapping.items():
+            for _name, schema_attr in attrs.items():
+                valid_mjc.add(schema_attr.usd_attribute_name)
+                if hasattr(schema_attr, "attribute_names") and schema_attr.attribute_names:
+                    for an in schema_attr.attribute_names:
+                        valid_mjc.add(an)
+
+        # From custom attributes
+        for _key, attr in self.builder.custom_attributes.items():
+            if attr.namespace != "mujoco":
+                continue
+            usd_name = getattr(attr, "usd_attribute_name", None)
+            if usd_name and usd_name != "*" and usd_name.startswith("mjc:"):
+                valid_mjc.add(usd_name)
+
+        # Find all mjc: names in the RST (inside backticks)
+        rst_mjc = set(re.findall(r"``(mjc:[^`]+)``", self.rst_content))
+
+        invented = rst_mjc - valid_mjc
+        self.assertEqual(invented, set(), f"mjc: names in .rst that don't exist in code: {invented}")
 
 
 class TestUpdateContactsPointPositions(unittest.TestCase):
