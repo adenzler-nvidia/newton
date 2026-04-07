@@ -1290,16 +1290,16 @@ custom attributes (``model.mujoco.<name>``):
    * - USD attribute
      - Newton property
      - Default
-   * - ``mjc:ctrlRange:min`` / ``max``
+   * - ``mjc:ctrlRange:min`` / ``mjc:ctrlRange:max``
      - ``ctrl_low`` / ``ctrl_high``
      - 0.0
-   * - ``mjc:forceRange:min`` / ``max``
+   * - ``mjc:forceRange:min`` / ``mjc:forceRange:max``
      - ``force_low`` / ``force_high``
      - 0.0
-   * - ``mjc:actRange:min`` / ``max``
+   * - ``mjc:actRange:min`` / ``mjc:actRange:max``
      - ``act_low`` / ``act_high``
      - 0.0
-   * - ``mjc:lengthRange:min`` / ``max``
+   * - ``mjc:lengthRange:min`` / ``mjc:lengthRange:max``
      - ``length_low`` / ``length_high``
      - 0.0
    * - ``mjc:gainPrm``

@@ -8326,7 +8326,7 @@ class TestMuJoCoDocCoverage(unittest.TestCase):
         seen = set()
         for prim_type, attrs in SchemaResolverMjc.mapping.items():
             for newton_name, schema_attr in attrs.items():
-                usd_name = schema_attr.usd_attribute_name
+                usd_name = schema_attr.name
                 if usd_name in seen:
                     continue
                 seen.add(usd_name)
@@ -8359,7 +8359,7 @@ class TestMuJoCoDocCoverage(unittest.TestCase):
         # From SchemaResolverMjc
         for _prim_type, attrs in SchemaResolverMjc.mapping.items():
             for _name, schema_attr in attrs.items():
-                valid_mjc.add(schema_attr.usd_attribute_name)
+                valid_mjc.add(schema_attr.name)
                 if hasattr(schema_attr, "attribute_names") and schema_attr.attribute_names:
                     for an in schema_attr.attribute_names:
                         valid_mjc.add(an)
@@ -8376,6 +8376,8 @@ class TestMuJoCoDocCoverage(unittest.TestCase):
         rst_mjc = set(re.findall(r"``(mjc:[^`]+)``", self.rst_content))
 
         invented = rst_mjc - valid_mjc
+        # Exclude placeholder names used in prose examples
+        invented.discard("mjc:attr")
         self.assertEqual(invented, set(), f"mjc: names in .rst that don't exist in code: {invented}")
 
 
