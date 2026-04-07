@@ -376,10 +376,547 @@ frequencies for variable-length entity types.  Call it on a
 :meth:`~newton.ModelBuilder.finalize`, the attributes are accessible as
 ``model.mujoco.<name>``.
 
-See the :meth:`~newton.solvers.SolverMuJoCo.register_custom_attributes` API
-documentation for the full catalog of registered frequencies and attributes,
-and :doc:`/concepts/custom_attributes` for background on Newton's
+See :doc:`/concepts/custom_attributes` for background on Newton's
 custom-attribute system.
+
+**Custom frequencies:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Frequency
+     - Description
+   * - ``mujoco:pair``
+     - Explicit contact pairs (from MJCF ``<contact><pair>``).
+   * - ``mujoco:actuator``
+     - General MuJoCo actuators.
+   * - ``mujoco:tendon``
+     - Fixed and spatial tendons.
+   * - ``mujoco:tendon_joint``
+     - Per-joint entries inside fixed tendons.
+   * - ``mujoco:tendon_wrap``
+     - Per-element entries inside spatial tendon wrap paths.
+
+**Geom / shape attributes** (frequency: ``SHAPE``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``condim``
+     - ``int32``
+     - 3
+     - Contact dimensionality.
+   * - ``geom_priority``
+     - ``int32``
+     - 0
+     - Contact-parameter mixing priority.
+   * - ``geom_solimp``
+     - ``vec5``
+     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
+     - Solver impedance parameters.
+   * - ``geom_solmix``
+     - ``float32``
+     - 1.0
+     - Solver mixing weight.
+
+**Joint / DOF attributes** (frequency: ``JOINT_DOF``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``limit_margin``
+     - ``float32``
+     - 0.0
+     - Joint-limit margin [m or rad].
+   * - ``solimplimit``
+     - ``vec5``
+     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
+     - Solver impedance for joint limits.
+   * - ``solreffriction``
+     - ``vec2``
+     - ``(0.02, 1.0)``
+     - Solver reference for joint friction.
+   * - ``solimpfriction``
+     - ``vec5``
+     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
+     - Solver impedance for joint friction.
+   * - ``dof_passive_stiffness``
+     - ``float32``
+     - 0.0
+     - Passive spring stiffness [N/m or N·m/rad].
+   * - ``dof_passive_damping``
+     - ``float32``
+     - 0.0
+     - Passive damping coefficient [N·s/m or N·m·s/rad].
+   * - ``dof_springref``
+     - ``float32``
+     - 0.0
+     - Spring reference position [m or rad].
+   * - ``dof_ref``
+     - ``float32``
+     - 0.0
+     - Joint reference position [m or rad].
+   * - ``jnt_actgravcomp``
+     - ``bool``
+     - ``False``
+     - Per-DOF actuator gravity compensation flag.
+
+**Body attributes** (frequency: ``BODY``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``gravcomp``
+     - ``float32``
+     - 0.0
+     - Gravity compensation scaling factor.
+
+**Equality constraint attributes** (frequency: ``EQUALITY_CONSTRAINT``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``eq_solref``
+     - ``vec2``
+     - ``(0.02, 1.0)``
+     - Solver reference for equality constraints.
+   * - ``eq_solimp``
+     - ``vec5``
+     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
+     - Solver impedance for equality constraints.
+
+**Solver options — per-world** (frequency: ``WORLD``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``impratio``
+     - ``float32``
+     - 1.0
+     - Impedance ratio.
+   * - ``tolerance``
+     - ``float32``
+     - 1e-8
+     - Solver tolerance.
+   * - ``ls_tolerance``
+     - ``float32``
+     - 0.01
+     - Line-search tolerance.
+   * - ``ccd_tolerance``
+     - ``float32``
+     - 1e-6
+     - CCD tolerance.
+   * - ``density``
+     - ``float32``
+     - 0.0
+     - Medium density [kg/m³].
+   * - ``viscosity``
+     - ``float32``
+     - 0.0
+     - Medium viscosity [Pa·s].
+   * - ``wind``
+     - ``vec3``
+     - ``(0, 0, 0)``
+     - Wind velocity [m/s].
+   * - ``magnetic``
+     - ``vec3``
+     - ``(0, -0.5, 0)``
+     - Magnetic flux [T].
+
+**Solver options — per-model** (frequency: ``ONCE``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``iterations``
+     - ``int32``
+     - 100
+     - Maximum solver iterations.
+   * - ``ls_iterations``
+     - ``int32``
+     - 50
+     - Maximum line-search iterations.
+   * - ``ccd_iterations``
+     - ``int32``
+     - 35
+     - Maximum CCD iterations.
+   * - ``sdf_iterations``
+     - ``int32``
+     - 10
+     - Maximum SDF iterations.
+   * - ``sdf_initpoints``
+     - ``int32``
+     - 40
+     - SDF initial sample points.
+   * - ``integrator``
+     - ``int32``
+     - ``3`` (implicitfast)
+     - Integration scheme.
+   * - ``solver``
+     - ``int32``
+     - ``2`` (newton)
+     - Constraint solver.
+   * - ``cone``
+     - ``int32``
+     - ``0`` (pyramidal)
+     - Friction cone type.
+   * - ``jacobian``
+     - ``int32``
+     - ``2`` (auto)
+     - Jacobian type.
+
+**Compiler options** (frequency: ``ONCE``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``autolimits``
+     - ``bool``
+     - ``True``
+     - Enable automatic limit inference.
+
+**Pair attributes** (frequency: ``mujoco:pair``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``pair_world``
+     - ``int32``
+     - 0
+     - World index for this pair.
+   * - ``pair_geom1``
+     - ``int32``
+     - -1
+     - First shape index.
+   * - ``pair_geom2``
+     - ``int32``
+     - -1
+     - Second shape index.
+   * - ``pair_condim``
+     - ``int32``
+     - 3
+     - Contact dimensionality.
+   * - ``pair_solref``
+     - ``vec2``
+     - ``(0.02, 1.0)``
+     - Solver reference.
+   * - ``pair_solreffriction``
+     - ``vec2``
+     - ``(0.02, 1.0)``
+     - Solver reference for friction.
+   * - ``pair_solimp``
+     - ``vec5``
+     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
+     - Solver impedance.
+   * - ``pair_margin``
+     - ``float32``
+     - 0.0
+     - Contact margin [m].
+   * - ``pair_gap``
+     - ``float32``
+     - 0.0
+     - Contact gap [m].
+   * - ``pair_friction``
+     - ``vec5``
+     - ``(1, 1, 0.005, 0.0001, 0.0001)``
+     - Five-element friction.
+
+**Actuator attributes** (frequency: ``mujoco:actuator`` unless noted):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``joint_dof_label``
+     - ``str``
+     - ``""``
+     - DOF label strings (frequency: ``JOINT_DOF``).
+   * - ``actuator_trnid``
+     - ``vec2i``
+     - ``(-1, -1)``
+     - Transmission target index pair.
+   * - ``actuator_target_label``
+     - ``str``
+     - ``""``
+     - Target path label resolved from USD.
+   * - ``actuator_trntype``
+     - ``int32``
+     - ``0``
+     - Transmission type (0 = joint).
+   * - ``actuator_dyntype``
+     - ``int32``
+     - ``0``
+     - Activation dynamics type (0 = none).
+   * - ``actuator_gaintype``
+     - ``int32``
+     - ``0``
+     - Gain type (0 = fixed).
+   * - ``actuator_biastype``
+     - ``int32``
+     - ``0``
+     - Bias type (0 = none).
+   * - ``actuator_world``
+     - ``int32``
+     - -1
+     - World index.
+   * - ``actuator_ctrllimited``
+     - ``int32``
+     - ``2``
+     - Control-range limiting tri-state (2 = auto).
+   * - ``actuator_forcelimited``
+     - ``int32``
+     - ``2``
+     - Force-range limiting tri-state (2 = auto).
+   * - ``actuator_ctrlrange``
+     - ``vec2``
+     - ``(0, 0)``
+     - Control range.
+   * - ``actuator_has_ctrlrange``
+     - ``int32``
+     - 0
+     - Whether ``ctrlrange`` was explicitly authored.
+   * - ``actuator_forcerange``
+     - ``vec2``
+     - ``(0, 0)``
+     - Force range [N].
+   * - ``actuator_has_forcerange``
+     - ``int32``
+     - 0
+     - Whether ``forcerange`` was explicitly authored.
+   * - ``actuator_gear``
+     - ``float[6]``
+     - ``(1, 0, 0, 0, 0, 0)``
+     - Gear ratio vector.
+   * - ``actuator_cranklength``
+     - ``float32``
+     - 0.0
+     - Crank length for slider-crank [m].
+   * - ``actuator_dynprm``
+     - ``float[10]``
+     - ``(1, 0, …, 0)``
+     - Activation dynamics parameters.
+   * - ``actuator_gainprm``
+     - ``float[10]``
+     - ``(1, 0, …, 0)``
+     - Gain parameters.
+   * - ``actuator_biasprm``
+     - ``float[10]``
+     - ``(0, 0, …, 0)``
+     - Bias parameters.
+   * - ``actuator_actlimited``
+     - ``int32``
+     - ``2``
+     - Activation-range limiting tri-state (2 = auto).
+   * - ``actuator_actrange``
+     - ``vec2``
+     - ``(0, 0)``
+     - Activation range.
+   * - ``actuator_has_actrange``
+     - ``int32``
+     - 0
+     - Whether ``actrange`` was explicitly authored.
+   * - ``actuator_actdim``
+     - ``int32``
+     - -1
+     - Activation state dimension (-1 = auto).
+   * - ``actuator_actearly``
+     - ``bool``
+     - ``False``
+     - Apply activation at start of step.
+   * - ``ctrl``
+     - ``float32``
+     - 0.0
+     - Control signal (assignment: ``CONTROL``).
+   * - ``ctrl_source``
+     - ``int32``
+     - 0
+     - Control source enum (``CTRL_DIRECT``).
+
+**Tendon attributes** (frequency: ``mujoco:tendon`` unless noted):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``tendon_world``
+     - ``int32``
+     - 0
+     - World index.
+   * - ``tendon_stiffness``
+     - ``float32``
+     - 0.0
+     - Spring stiffness [N/m].
+   * - ``tendon_damping``
+     - ``float32``
+     - 0.0
+     - Damping coefficient [N·s/m].
+   * - ``tendon_frictionloss``
+     - ``float32``
+     - 0.0
+     - Friction loss [N].
+   * - ``tendon_limited``
+     - ``int32``
+     - ``2``
+     - Length-limit tri-state (2 = auto).
+   * - ``tendon_range``
+     - ``vec2``
+     - ``(0, 0)``
+     - Length range [m].
+   * - ``tendon_margin``
+     - ``float32``
+     - 0.0
+     - Length-limit margin [m].
+   * - ``tendon_solref_limit``
+     - ``vec2``
+     - ``(0.02, 1.0)``
+     - Solver reference for length limits.
+   * - ``tendon_solimp_limit``
+     - ``vec5``
+     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
+     - Solver impedance for length limits.
+   * - ``tendon_solref_friction``
+     - ``vec2``
+     - ``(0.02, 1.0)``
+     - Solver reference for friction.
+   * - ``tendon_solimp_friction``
+     - ``vec5``
+     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
+     - Solver impedance for friction.
+   * - ``tendon_armature``
+     - ``float32``
+     - 0.0
+     - Armature [kg].
+   * - ``tendon_springlength``
+     - ``vec2``
+     - ``(-1, -1)``
+     - Spring rest length [m] (-1 = use model length).
+   * - ``tendon_joint_adr``
+     - ``int32``
+     - 0
+     - Start address into joint arrays.
+   * - ``tendon_joint_num``
+     - ``int32``
+     - 0
+     - Number of joints in this tendon.
+   * - ``tendon_actuator_force_range``
+     - ``vec2``
+     - ``(0, 0)``
+     - Actuator force range [N].
+   * - ``tendon_actuator_force_limited``
+     - ``int32``
+     - ``2``
+     - Actuator force limiting tri-state (2 = auto).
+   * - ``tendon_label``
+     - ``str``
+     - ``""``
+     - Tendon name string.
+   * - ``tendon_type``
+     - ``int32``
+     - 0
+     - Tendon type (0 = fixed, 1 = spatial).
+   * - ``tendon_wrap_adr``
+     - ``int32``
+     - 0
+     - Start address into wrap-path arrays.
+   * - ``tendon_wrap_num``
+     - ``int32``
+     - 0
+     - Number of wrap elements.
+
+**Tendon joint attributes** (frequency: ``mujoco:tendon_joint``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``tendon_joint``
+     - ``int32``
+     - -1
+     - Joint index per entry.
+   * - ``tendon_coef``
+     - ``float32``
+     - 0.0
+     - Joint coefficient per entry.
+
+**Spatial tendon wrap attributes** (frequency: ``mujoco:tendon_wrap``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 20 40
+
+   * - Name
+     - Type
+     - Default
+     - Description
+   * - ``tendon_wrap_type``
+     - ``int32``
+     - 0
+     - Wrap element type (0 = site, 1 = geom, 2 = pulley).
+   * - ``tendon_wrap_shape``
+     - ``int32``
+     - -1
+     - Shape index for geom wraps.
+   * - ``tendon_wrap_sidesite``
+     - ``int32``
+     - -1
+     - Side-site shape index.
+   * - ``tendon_wrap_prm``
+     - ``float32``
+     - 0.0
+     - Wrap parameter.
 
 
 .. _mujoco-usd-schemas:
