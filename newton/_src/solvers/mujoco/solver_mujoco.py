@@ -417,6 +417,13 @@ class SolverMuJoCo(SolverBase):
         `MuJoCo XML Reference <https://mujoco.readthedocs.io/en/latest/XMLreference.html>`_
         for detailed attribute semantics.
         """
+        # ──────────────────────────────────────────────────────────────
+        # IMPORTANT: When adding, removing, or modifying custom attributes
+        # or frequencies below, update docs/integrations/mujoco.rst to match.
+        # The TestMuJoCoDocCoverage test enforces this and will fail on CI
+        # if the docs fall out of sync.
+        # ──────────────────────────────────────────────────────────────
+
         # Register custom frequencies before adding attributes that use them
         # This is required as custom frequencies must be registered before use
 

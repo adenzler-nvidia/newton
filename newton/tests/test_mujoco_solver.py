@@ -8349,6 +8349,85 @@ class TestMuJoCoDocCoverage(unittest.TestCase):
                 missing.append(f"{attr.name} -> {usd_name}")
         self.assertEqual(missing, [], f"Custom attr USD names missing from mujoco.rst: {missing}")
 
+    def test_no_stale_custom_attr_names_in_rst(self):
+        """Every custom attr name in the .rst custom-attributes section must
+        still be registered in code.  Catches doc entries left behind after
+        code removal."""
+        # Collect all registered mujoco custom attribute names
+        registered = set()
+        for _key, attr in self.builder.custom_attributes.items():
+            if attr.namespace != "mujoco":
+                continue
+            registered.add(attr.name)
+
+        # Extract custom attr names from the .rst that appear inside
+        # ``backticks`` within the custom-attributes-and-frequencies section
+        section_match = re.search(
+            r"Custom Attributes and Frequencies\n-+\n(.*?)(?:\n\.\. _|\Z)",
+            self.rst_content,
+            re.DOTALL,
+        )
+        if section_match is None:
+            self.skipTest("Custom Attributes section not found in .rst")
+
+        section = section_match.group(1)
+        # Match backtick-quoted names that look like custom attr names
+        # (lowercase, underscores, no colons — distinguishes from mjc: USD names)
+        rst_names = set(re.findall(r"``([a-z][a-z0-9_]+)``", section))
+
+        # Filter to plausible custom attr names (exclude RST directives, etc.)
+        known_single_word = {
+            "condim",
+            "gravcomp",
+            "impratio",
+            "tolerance",
+            "density",
+            "viscosity",
+            "wind",
+            "magnetic",
+            "iterations",
+            "integrator",
+            "solver",
+            "cone",
+            "jacobian",
+            "autolimits",
+            "ctrl",
+        }
+        plausible = {n for n in rst_names if "_" in n or n in known_single_word or n in registered}
+
+        stale = plausible - registered
+        # Exclude known non-attr names that appear in backticks
+        false_positives = {"mujoco", "model", "state", "control", "finalize"}
+        stale -= false_positives
+
+        self.assertEqual(
+            stale,
+            set(),
+            f"Custom attr names in .rst that are no longer registered: {stale}",
+        )
+
+    def test_critical_defaults_match_code(self):
+        """Spot-check that key defaults documented in .rst match the code."""
+        spot_checks = {
+            "condim": 3,
+            "iterations": 100,
+            "impratio": 1.0,
+            "density": 0.0,
+        }
+        for attr_name, expected_default in spot_checks.items():
+            key = f"mujoco:{attr_name}"
+            attr = self.builder.custom_attributes.get(key)
+            self.assertIsNotNone(attr, f"Custom attr {key} not found")
+            actual = attr.default
+            # Handle warp scalar types
+            if hasattr(actual, "numpy"):
+                actual = actual.numpy()
+            self.assertEqual(
+                actual,
+                expected_default,
+                f"Default for {attr_name} changed in code ({actual}) — update docs/integrations/mujoco.rst",
+            )
+
     def test_no_invented_mjc_names_in_rst(self):
         """Every mjc: name mentioned in the .rst must exist in either
         SchemaResolverMjc or register_custom_attributes."""

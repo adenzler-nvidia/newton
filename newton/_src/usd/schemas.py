@@ -281,6 +281,9 @@ class SchemaResolverMjc(SchemaResolver):
 
     name: ClassVar[str] = "mjc"
 
+    # IMPORTANT: When adding or modifying entries below, update
+    # docs/integrations/mujoco.rst to match.  TestMuJoCoDocCoverage
+    # enforces this and will fail on CI if the docs fall out of sync.
     mapping: ClassVar[dict[PrimType, dict[str, SchemaAttribute]]] = {
         PrimType.SCENE: {
             "max_solver_iterations": SchemaAttribute("mjc:option:iterations", 100),
