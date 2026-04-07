@@ -940,18 +940,14 @@ MuJoCo attributes are named ``mjc:attr`` in USD files rather than
 The following tables list the subset of ``mjc:`` attributes currently supported
 by Newton.  Attributes not listed here are ignored during USD import.
 
-Newton reads ``mjc:`` attributes through two complementary systems:
-
-1. **Schema resolver** — ``SchemaResolverMjc`` maps a core set of ``mjc:``
-   attributes to Newton's **native** simulation properties (e.g.,
-   ``mjc:armature`` → ``Joint.armature``).  Tables below with a
-   "Newton property" column show these mappings.
-
-2. **Custom attributes** — additional ``mjc:`` attributes registered by
-   :meth:`~newton.solvers.SolverMuJoCo.register_custom_attributes` are
-   parsed into the ``mujoco`` custom-attribute namespace, accessible after
-   finalization as ``model.mujoco.<name>``.  Tables with a "Newton custom
-   attribute" column show these.
+Newton reads ``mjc:`` attributes through two complementary systems.
+``SchemaResolverMjc`` maps a core set to Newton's native simulation
+properties (e.g., ``mjc:armature`` → ``Joint.armature``), while
+:meth:`~newton.solvers.SolverMuJoCo.register_custom_attributes` parses
+additional ``mjc:`` attributes into the ``mujoco`` custom-attribute
+namespace (accessible as ``model.mujoco.<name>``).  The tables below
+unify both; native properties are shown by name while custom attributes
+use the ``model.mujoco.`` prefix.
 
 Both systems require calling
 :meth:`~newton.solvers.SolverMuJoCo.register_custom_attributes` on the
@@ -971,14 +967,14 @@ Default
 values shown are the mjcPhysics schema defaults, which may differ from Newton's
 own API defaults.
 
-**Scene** (``PhysicsScene``):
+**Scene** (``PhysicsScene``, ``MjcSceneAPI``):
 
 .. list-table::
    :header-rows: 1
    :widths: 35 35 30
 
    * - USD attribute
-     - Newton property
+     - Newton target
      - Default
    * - ``mjc:option:iterations``
      - ``max_solver_iterations``
@@ -989,89 +985,66 @@ own API defaults.
    * - ``mjc:flag:gravity``
      - ``gravity_enabled``
      - ``True``
-
-The following scene attributes are also parsed from USD via custom
-attributes (``model.mujoco.<name>``):
-
-**Solver options — per-world** (frequency: ``WORLD``):
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 35 30
-
-   * - USD attribute
-     - Newton custom attribute
-     - Default
    * - ``mjc:option:impratio``
-     - ``impratio``
+     - ``model.mujoco.impratio``
      - 1.0
    * - ``mjc:option:tolerance``
-     - ``tolerance``
+     - ``model.mujoco.tolerance``
      - 1e-8
    * - ``mjc:option:ls_tolerance``
-     - ``ls_tolerance``
+     - ``model.mujoco.ls_tolerance``
      - 0.01
    * - ``mjc:option:ccd_tolerance``
-     - ``ccd_tolerance``
+     - ``model.mujoco.ccd_tolerance``
      - 1e-6
    * - ``mjc:option:density``
-     - ``density``
+     - ``model.mujoco.density``
      - 0.0
    * - ``mjc:option:viscosity``
-     - ``viscosity``
+     - ``model.mujoco.viscosity``
      - 0.0
    * - ``mjc:option:wind``
-     - ``wind``
+     - ``model.mujoco.wind``
      - ``(0, 0, 0)``
    * - ``mjc:option:magnetic``
-     - ``magnetic``
+     - ``model.mujoco.magnetic``
      - ``(0, -0.5, 0)``
-
-**Solver options — per-model** (frequency: ``ONCE``):
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 35 30
-
-   * - USD attribute
-     - Newton custom attribute
-     - Default
    * - ``mjc:option:iterations``
-     - ``iterations``
+     - ``model.mujoco.iterations``
      - 100
    * - ``mjc:option:ls_iterations``
-     - ``ls_iterations``
+     - ``model.mujoco.ls_iterations``
      - 50
    * - ``mjc:option:ccd_iterations``
-     - ``ccd_iterations``
+     - ``model.mujoco.ccd_iterations``
      - 35
    * - ``mjc:option:sdf_iterations``
-     - ``sdf_iterations``
+     - ``model.mujoco.sdf_iterations``
      - 10
    * - ``mjc:option:sdf_initpoints``
-     - ``sdf_initpoints``
+     - ``model.mujoco.sdf_initpoints``
      - 40
    * - ``mjc:option:integrator``
-     - ``integrator``
+     - ``model.mujoco.integrator``
      - ``3`` (implicitfast)
    * - ``mjc:option:solver``
-     - ``solver``
+     - ``model.mujoco.solver``
      - ``2`` (newton)
    * - ``mjc:option:cone``
-     - ``cone``
+     - ``model.mujoco.cone``
      - ``0`` (pyramidal)
    * - ``mjc:option:jacobian``
-     - ``jacobian``
+     - ``model.mujoco.jacobian``
      - ``2`` (auto)
 
-**Joint** (``PhysicsRevoluteJoint``, ``PhysicsPrismaticJoint``, etc.):
+**Joint** (``PhysicsRevoluteJoint``, ``PhysicsPrismaticJoint``, etc. — ``MjcJointAPI``):
 
 .. list-table::
    :header-rows: 1
    :widths: 35 35 30
 
    * - USD attribute
-     - Newton property
+     - Newton target
      - Default
    * - ``mjc:armature``
      - ``armature``
@@ -1082,6 +1055,33 @@ attributes (``model.mujoco.<name>``):
    * - ``mjc:solref``
      - ``limit_*_ke`` / ``limit_*_kd``
      - ``[0.02, 1.0]``
+   * - ``mjc:margin``
+     - ``model.mujoco.limit_margin``
+     - 0.0
+   * - ``mjc:solimplimit``
+     - ``model.mujoco.solimplimit``
+     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
+   * - ``mjc:solreffriction``
+     - ``model.mujoco.solreffriction``
+     - ``(0.02, 1.0)``
+   * - ``mjc:solimpfriction``
+     - ``model.mujoco.solimpfriction``
+     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
+   * - ``mjc:stiffness``
+     - ``model.mujoco.dof_passive_stiffness``
+     - 0.0
+   * - ``mjc:damping``
+     - ``model.mujoco.dof_passive_damping``
+     - 0.0
+   * - ``mjc:springref``
+     - ``model.mujoco.dof_springref``
+     - 0.0
+   * - ``mjc:ref``
+     - ``model.mujoco.dof_ref``
+     - 0.0
+   * - ``mjc:actuatorgravcomp``
+     - ``model.mujoco.jnt_actgravcomp``
+     - ``False``
 
 The ``mjc:solref`` attribute is mapped to per-axis limit stiffness and damping
 for all joint DOFs (``transX``, ``transY``, ``transZ``, ``rotX``, ``rotY``,
@@ -1094,56 +1094,15 @@ for all joint DOFs (``transX``, ``transY``, ``transZ``, ``rotX``, ``rotY``,
    `issue #2009 <https://github.com/newton-physics/newton/issues/2009>`_
    for details.
 
-The following joint attributes are also parsed from USD via custom
-attributes (``model.mujoco.<name>``):
+**Shape — collision** (``PhysicsCollisionAPI``, ``MjcCollisionAPI``):
 
 .. list-table::
    :header-rows: 1
    :widths: 35 35 30
 
    * - USD attribute
-     - Newton custom attribute
+     - Newton target
      - Default
-   * - ``mjc:margin``
-     - ``limit_margin``
-     - 0.0
-   * - ``mjc:solimplimit``
-     - ``solimplimit``
-     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
-   * - ``mjc:solreffriction``
-     - ``solreffriction``
-     - ``(0.02, 1.0)``
-   * - ``mjc:solimpfriction``
-     - ``solimpfriction``
-     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
-   * - ``mjc:stiffness``
-     - ``dof_passive_stiffness``
-     - 0.0
-   * - ``mjc:damping``
-     - ``dof_passive_damping``
-     - 0.0
-   * - ``mjc:springref``
-     - ``dof_springref``
-     - 0.0
-   * - ``mjc:ref``
-     - ``dof_ref``
-     - 0.0
-   * - ``mjc:actuatorgravcomp``
-     - ``jnt_actgravcomp``
-     - ``False``
-
-**Shape** (``PhysicsCollisionAPI``):
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 35 30
-
-   * - USD attribute
-     - Newton property
-     - Default
-   * - ``mjc:maxhullvert``
-     - ``max_hull_vertices``
-     - -1
    * - ``mjc:margin``
      - ``margin``
      - 0.0
@@ -1153,6 +1112,24 @@ attributes (``model.mujoco.<name>``):
    * - ``mjc:solref``
      - ``ke`` / ``kd``
      - ``[0.02, 1.0]``
+   * - ``mjc:condim``
+     - ``model.mujoco.condim``
+     - 3
+   * - ``mjc:solimp``
+     - ``model.mujoco.geom_solimp``
+     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
+   * - ``mjc:solmix``
+     - ``model.mujoco.geom_solmix``
+     - 1.0
+   * - ``mjc:priority``
+     - ``model.mujoco.geom_priority``
+     - 0
+
+.. note::
+
+   ``margin`` and ``gap`` are set on collision shapes (geoms).  MuJoCo
+   defines them per-geom; Newton maps them to per-shape collision
+   properties.
 
 .. note::
 
@@ -1161,28 +1138,18 @@ attributes (``model.mujoco.<name>``):
    `issue #2009 <https://github.com/newton-physics/newton/issues/2009>`_
    for details.
 
-The following shape attributes are also parsed from USD via custom
-attributes (``model.mujoco.<name>``):
+**Shape — mesh** (``MjcMeshCollisionAPI``):
 
 .. list-table::
    :header-rows: 1
    :widths: 35 35 30
 
    * - USD attribute
-     - Newton custom attribute
+     - Newton target
      - Default
-   * - ``mjc:condim``
-     - ``condim``
-     - 3
-   * - ``mjc:solimp``
-     - ``geom_solimp``
-     - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
-   * - ``mjc:solmix``
-     - ``geom_solmix``
-     - 1.0
-   * - ``mjc:priority``
-     - ``geom_priority``
-     - 0
+   * - ``mjc:maxhullvert``
+     - ``max_hull_vertices``
+     - -1
 
 **Material — contact model** (``PhysicsMaterialAPI``; attributes from ``MjcCollisionAPI`` resolved per-material by Newton):
 
@@ -1216,17 +1183,20 @@ attributes (``model.mujoco.<name>``):
    `issue #2009 <https://github.com/newton-physics/newton/issues/2009>`_
    for details.
 
-**Body** (``UsdPhysicsRigidBodyAPI``; no dedicated ``MjcBodyAPI`` in schema):
+**Body** (``UsdPhysicsRigidBodyAPI``):
 
 .. list-table::
    :header-rows: 1
    :widths: 35 35 30
 
    * - USD attribute
-     - Newton property
+     - Newton target
      - Default
    * - ``mjc:damping``
      - ``rigid_body_linear_damping``
+     - 0.0
+   * - ``mjc:gravcomp``
+     - ``model.mujoco.gravcomp``
      - 0.0
 
 .. note::
@@ -1236,20 +1206,6 @@ attributes (``model.mujoco.<name>``):
    tendon prim, which maps to joint/tendon-level damping via custom
    attributes.
 
-The following body attribute is also parsed from USD via custom attributes
-(``model.mujoco.<name>``):
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 35 30
-
-   * - USD attribute
-     - Newton custom attribute
-     - Default
-   * - ``mjc:gravcomp``
-     - ``gravcomp``
-     - 0.0
-
 .. note::
 
    ``mjc:gravcomp`` is a Newton extension — MuJoCo defines ``gravcomp``
@@ -1258,21 +1214,18 @@ The following body attribute is also parsed from USD via custom attributes
 
 **Equality constraint** (``MjcEqualityAPI``):
 
-The following equality constraint attributes are parsed from USD via
-custom attributes (``model.mujoco.<name>``):
-
 .. list-table::
    :header-rows: 1
    :widths: 35 35 30
 
    * - USD attribute
-     - Newton custom attribute
+     - Newton target
      - Default
    * - ``mjc:solref``
-     - ``eq_solref``
+     - ``model.mujoco.eq_solref``
      - ``(0.02, 1.0)``
    * - ``mjc:solimp``
-     - ``eq_solimp``
+     - ``model.mujoco.eq_solimp``
      - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
 
 .. note::
@@ -1288,7 +1241,7 @@ custom attributes (``model.mujoco.<name>``):
    :widths: 35 35 30
 
    * - USD attribute
-     - Newton property
+     - Newton target
      - Default
    * - ``mjc:ctrlRange:min`` / ``mjc:ctrlRange:max``
      - ``ctrl_low`` / ``ctrl_high``
@@ -1324,10 +1277,10 @@ custom attributes (``model.mujoco.<name>``):
      - ``gear``
      - ``[1, 0, 0, 0, 0, 0]``
    * - ``mjc:actDim``
-     - ``actDim``
+     - ``model.mujoco.actuator_actdim``
      - -1 (auto)
    * - ``mjc:actEarly``
-     - ``actEarly``
+     - ``model.mujoco.actuator_actearly``
      - ``False``
 
 **Tendon** (``MjcTendon``):
@@ -1337,50 +1290,47 @@ custom attributes (``model.mujoco.<name>``):
    :widths: 35 35 30
 
    * - USD attribute
-     - Newton custom attribute
+     - Newton target
      - Default
    * - ``mjc:stiffness``
-     - ``tendon_stiffness``
+     - ``model.mujoco.tendon_stiffness``
      - 0.0
    * - ``mjc:damping``
-     - ``tendon_damping``
+     - ``model.mujoco.tendon_damping``
      - 0.0
    * - ``mjc:frictionloss``
-     - ``tendon_frictionloss``
+     - ``model.mujoco.tendon_frictionloss``
      - 0.0
    * - ``mjc:limited``
-     - ``tendon_limited``
+     - ``model.mujoco.tendon_limited``
      - ``2`` (auto)
    * - ``mjc:range:min`` / ``max``
-     - ``tendon_range``
+     - ``model.mujoco.tendon_range``
      - ``(0, 0)``
    * - ``mjc:margin``
-     - ``tendon_margin``
+     - ``model.mujoco.tendon_margin``
      - 0.0
    * - ``mjc:solreflimit``
-     - ``tendon_solref_limit``
+     - ``model.mujoco.tendon_solref_limit``
      - ``(0.02, 1.0)``
    * - ``mjc:solimplimit``
-     - ``tendon_solimp_limit``
+     - ``model.mujoco.tendon_solimp_limit``
      - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
    * - ``mjc:solreffriction``
-     - ``tendon_solref_friction``
+     - ``model.mujoco.tendon_solref_friction``
      - ``(0.02, 1.0)``
    * - ``mjc:solimpfriction``
-     - ``tendon_solimp_friction``
+     - ``model.mujoco.tendon_solimp_friction``
      - ``(0.9, 0.95, 0.001, 0.5, 2.0)``
    * - ``mjc:armature``
-     - ``tendon_armature``
+     - ``model.mujoco.tendon_armature``
      - 0.0
    * - ``mjc:springlength``
-     - ``tendon_springlength``
+     - ``model.mujoco.tendon_springlength``
      - ``(-1, -1)`` (use model length)
    * - ``mjc:actuatorfrcrange:min`` / ``max``
-     - ``tendon_actuator_force_range``
+     - ``model.mujoco.tendon_actuator_force_range``
      - ``(0, 0)``
    * - ``mjc:actuatorfrclimited``
-     - ``tendon_actuator_force_limited``
+     - ``model.mujoco.tendon_actuator_force_limited``
      - ``2`` (auto)
-
-Tendon attributes are stored in the ``mujoco`` custom-attribute namespace
-(``model.mujoco.tendon_*``), not as Newton native properties.
