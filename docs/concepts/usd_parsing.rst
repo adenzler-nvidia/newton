@@ -153,6 +153,13 @@ The table below shows MuJoCo attribute remapping examples, including both direct
      - ``margin``
      - ``margin = mjc:margin - mjc:gap``
 
+.. seealso::
+
+   :ref:`mujoco-usd-schemas` for the complete list of ``mjc:``
+   attributes Newton parses from USD, and
+   :ref:`mujoco-custom-attributes-and-frequencies` for the full catalog
+   of ``model.mujoco.*`` custom attributes.
+
 **Example USD with remapped attributes:**
 
 The following USD example demonstrates how PhysX attributes are authored in a USD file. The schema resolver automatically applies the transformations shown in the table above during import:
