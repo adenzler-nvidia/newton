@@ -228,8 +228,8 @@ class TestModelBuilderReplicate(unittest.TestCase):
         with mock.patch.object(builder, "add_world", side_effect=AssertionError("unexpected scalar merge")):
             builder.replicate(source, 2)
 
-    def test_replicated_worlds_cache_contact_pairs_without_filters(self):
-        """Reuse one contact-pair template when replicated worlds have no filters."""
+    def test_replicated_world_contact_pairs_without_filters(self):
+        """Enumerate each replicated world without introducing cross-world pairs."""
         source = ModelBuilder()
         for _ in range(4):
             body = source.add_body()
@@ -239,11 +239,13 @@ class TestModelBuilderReplicate(unittest.TestCase):
         builder.replicate(source, 4)
         self.assertEqual(len(builder._shape_collision_filter_pairs), 0)
 
-        with mock.patch.object(builder, "_test_group_pair", wraps=builder._test_group_pair) as test_group_pair:
-            model = builder.finalize(device="cpu")
-
-        self.assertEqual(model.shape_contact_pair_count, 4 * 6)
-        self.assertEqual(test_group_pair.call_count, 6)
+        model = builder.finalize(device="cpu")
+        expected = np.array(
+            [(4 * w + a, 4 * w + b) for w in range(4) for a in range(4) for b in range(a + 1, 4)],
+            dtype=np.int32,
+        )
+        self.assertEqual(model.shape_contact_pair_count, len(expected))
+        np.testing.assert_array_equal(model.shape_contact_pairs.numpy(), expected)
 
     def test_add_world_uses_public_composition(self):
         class TrackingBuilder(ModelBuilder):

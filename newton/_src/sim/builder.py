@@ -14281,296 +14281,54 @@ class ModelBuilder:
             validated_templates.add(template_key)
 
     def _find_shape_contact_pairs(self, model: Model) -> None:
-        shape_body_values = self.shape_body
-        filter_pairs = self._shape_collision_filter_pairs
-        world_filter_blocks: tuple[_ShapeCollisionFilterBlock, ...] = ()
-        explicit_filter_pairs: tuple[tuple[int, int], ...] = ()
-        if isinstance(filter_pairs, _BuilderShapeCollisionFilterPairs):
-            blocks = filter_pairs.blocks
-            self._validate_compact_shape_collision_filter_blocks(blocks)
-            # Compact blocks come from replicated builders; keep this path in
-            # world-local coordinates so identical worlds can share one template.
-            world_filter_blocks = tuple(block for block in blocks if block.world is not None)
-            # Blocks without a world assignment (add_builder outside a world
-            # context) are folded into the explicit residual pairs so they do
-            # not disable the fast path for the replicated worlds.
-            floating_block_pairs = (
-                (block.shape_start + shape_a, block.shape_start + shape_b)
-                for block in blocks
-                if block.world is None
-                for shape_a, shape_b in block.local_pairs
-            )
-            explicit_filter_pairs = tuple(
-                self._iter_validated_shape_collision_filter_pairs((*filter_pairs.explicit_pairs, *floating_block_pairs))
-            )
+        flags = np.asarray(self.shape_flags, dtype=np.int64)
+        groups = np.asarray(self.shape_collision_group, dtype=np.int64)
+        indices = np.flatnonzero(((flags & int(ShapeFlags.COLLIDE_SHAPES)) != 0) & (groups != 0)).astype(np.int32)
+        worlds = np.asarray(self.shape_world, dtype=np.int32)[indices]
+        order = np.argsort(worlds, kind="stable")
+        worlds, indices = worlds[order], indices[order]
+        bodies = np.asarray(self.shape_body, dtype=np.int32)[indices]
+        groups = groups[indices]
+        row_ends = np.searchsorted(worlds, worlds, side="right")
+        row_ends[worlds == -1] = len(indices)
+        width_max = np.max(row_ends - np.arange(len(indices)) - 1, initial=1)
+        # Batch more rows when each row has few world-compatible candidates.
+        block_size = max(128, 65536 // width_max)
 
-        use_world_templates = self.world_count > 0 and isinstance(filter_pairs, _BuilderShapeCollisionFilterPairs)
-        if use_world_templates:
-            shape_world_np = np.asarray(self.shape_world, dtype=np.int32)
-            starts = self.shape_world_start
-            if len(starts) != self.world_count + 2:
-                use_world_templates = False
-            else:
-                segment_worlds = np.full(self.shape_count, -1, dtype=np.int32)
-                for world in range(self.world_count):
-                    segment_worlds[starts[world] : starts[world + 1]] = world
-                use_world_templates = np.array_equal(segment_worlds, shape_world_np)
-                if use_world_templates:
-                    shape_body_np = np.asarray(shape_body_values, dtype=np.int32)
-                    body_world_np = np.asarray(self.body_world, dtype=np.int32)
-                    attached = shape_body_np >= 0
-                    # Body-relative template keys are valid only when shapes and their bodies share a world.
-                    use_world_templates = np.array_equal(
-                        shape_world_np[attached], body_world_np[shape_body_np[attached]]
-                    )
+        def blocks():
+            for start in range(0, len(indices), block_size):
+                stop = min(start + block_size, len(indices))
+                rows = np.arange(start, stop)[:, None]
+                ends = row_ends[start:stop, None]
+                width = int((ends - rows - 1).max())
+                # Broadcast columns shared by rows in the same world.
+                if np.all(ends == ends[0]):
+                    ends = ends[:1]
+                cols = ends - np.arange(width, 0, -1)[None, :]
+                body_a, body_b = bodies[rows], bodies[cols]
+                group_a, group_b = groups[rows], groups[cols]
+                valid = rows < cols
+                valid &= body_a != body_b
+                valid &= (body_a >= 0) | (body_b >= 0)
+                valid &= np.where(group_a > 0, (group_a == group_b) | (group_b < 0), group_a != group_b)
+                if model.shape_collision_filter_pairs:
+                    a, b = np.nonzero(valid)
+                    pairs = np.column_stack((indices[start + a], indices[np.broadcast_to(cols, valid.shape)[a, b]]))
+                    valid[a, b] = ~model.shape_collision_filter_mask(pairs)
+                yield start, cols, valid
 
-        if use_world_templates:
-            blocks_by_world = {}
-            global_filter_pairs = set()
-            explicit_filters_by_world = {}
-            for block in world_filter_blocks:
-                world = block.world
-                if world < 0 or world >= self.world_count:
-                    use_world_templates = False
-                    break
-
-                world_start = self.shape_world_start[world]
-                world_end = self.shape_world_start[world + 1]
-                if block.shape_start < world_start or block.shape_start + block.shape_count > world_end:
-                    use_world_templates = False
-                    break
-
-                # Store block starts as world-local offsets for the template cache
-                # instead of keying homogeneous worlds by absolute shape ids.
-                blocks_by_world.setdefault(world, []).append(
-                    (block.shape_start - world_start, block.shape_count, block.local_pairs)
-                )
-
-            if use_world_templates:
-                # Residual explicit filters may involve global shapes, so split
-                # them into globally keyed filters and per-world local filters.
-                for shape_a, shape_b in explicit_filter_pairs:
-                    world_a = self.shape_world[shape_a]
-                    world_b = self.shape_world[shape_b]
-
-                    if world_a == -1 and world_b == -1:
-                        global_filter_pairs.add((shape_a, shape_b))
-                    elif world_a == -1 and world_b >= 0:
-                        explicit_filters_by_world.setdefault(world_b, []).append(
-                            ("global_local", shape_a, shape_b - self.shape_world_start[world_b])
-                        )
-                    elif world_b == -1 and world_a >= 0:
-                        explicit_filters_by_world.setdefault(world_a, []).append(
-                            ("global_local", shape_b, shape_a - self.shape_world_start[world_a])
-                        )
-                    elif world_a == world_b and world_a >= 0:
-                        world_start = self.shape_world_start[world_a]
-                        explicit_filters_by_world.setdefault(world_a, []).append(
-                            ("local", shape_a - world_start, shape_b - world_start)
-                        )
-                    # Cross-world pairs never collide, so filtering them is a no-op.
-
-            if use_world_templates:
-                contact_pairs = []
-                shape_flags_np = np.asarray(self.shape_flags, dtype=np.int64)
-                colliding_np = (shape_flags_np & int(ShapeFlags.COLLIDE_SHAPES)) != 0
-                colliding_globals = [
-                    (int(shape_idx), self.shape_collision_group[shape_idx], int(shape_body_np[shape_idx]))
-                    for shape_idx in np.flatnonzero((shape_world_np == -1) & colliding_np)
-                ]
-
-                for i1, (shape_a, group_a, body_a) in enumerate(colliding_globals):
-                    for shape_b, group_b, body_b in colliding_globals[i1 + 1 :]:
-                        # Same-body and static-static shape pairs are inherently filtered.
-                        if body_a == body_b or (body_a < 0 and body_b < 0):
-                            continue
-                        if not self._test_group_pair(group_a, group_b):
-                            continue
-                        pair = (shape_a, shape_b) if shape_a <= shape_b else (shape_b, shape_a)
-                        if pair not in global_filter_pairs:
-                            contact_pairs.append(pair)
-
-                shape_group_np = np.asarray(self.shape_collision_group, dtype=np.int64)
-                template_cache = {}
-                template_runs: list[tuple[list[int], tuple[np.ndarray, np.ndarray]]] = []
-                for world in range(self.world_count):
-                    world_start = self.shape_world_start[world]
-                    world_end = self.shape_world_start[world + 1]
-                    if world_start == world_end:
-                        continue
-
-                    block_specs = tuple(blocks_by_world.get(world, ()))
-                    explicit_filter_specs = tuple(explicit_filters_by_world.get(world, ()))
-                    block_key = tuple(
-                        (offset, shape_count, id(local_pairs)) for offset, shape_count, local_pairs in block_specs
-                    )
-                    world_shape_bodies_np = shape_body_np[world_start:world_end]
-                    body_key = np.where(
-                        world_shape_bodies_np >= 0,
-                        world_shape_bodies_np - self.body_world_start[world],
-                        -1,
-                    ).tobytes()
-                    # Key homogeneous worlds by raw bytes instead of Python
-                    # tuples; re-hashing per-shape tuples per world dominates
-                    # this loop at high world counts.
-                    cache_key = (
-                        shape_flags_np[world_start:world_end].tobytes(),
-                        shape_group_np[world_start:world_end].tobytes(),
-                        body_key,
-                        block_key,
-                        explicit_filter_specs,
-                    )
-                    cached_pairs = template_cache.get(cache_key)
-
-                    if cached_pairs is None:
-                        collision_groups = self.shape_collision_group[world_start:world_end]
-                        world_shape_bodies = _list_for_iteration(world_shape_bodies_np)
-                        local_colliding_indices = np.flatnonzero(colliding_np[world_start:world_end]).tolist()
-
-                        # Replicated-block filters are local to the source block;
-                        # shift them into this world's local shape coordinates.
-                        local_filters = set()
-                        for block_offset, _shape_count, local_filter_pairs in block_specs:
-                            for shape_a, shape_b in local_filter_pairs:
-                                offset_shape_a = block_offset + shape_a
-                                offset_shape_b = block_offset + shape_b
-                                local_filters.add(
-                                    (offset_shape_a, offset_shape_b)
-                                    if offset_shape_a <= offset_shape_b
-                                    else (offset_shape_b, offset_shape_a)
-                                )
-
-                        global_local_filters = set()
-                        for kind, shape_a, shape_b in explicit_filter_specs:
-                            if kind == "local":
-                                local_filters.add((shape_a, shape_b) if shape_a <= shape_b else (shape_b, shape_a))
-                            else:
-                                global_local_filters.add((shape_a, shape_b))
-
-                        # Cache global/local pairs separately: the global id is
-                        # absolute, while the local id is shifted during replay.
-                        global_local_pairs = []
-                        for global_shape, global_group, global_body in colliding_globals:
-                            for local_shape in local_colliding_indices:
-                                local_body = world_shape_bodies[local_shape]
-                                # Same-body and static-static shape pairs are inherently filtered.
-                                if global_body == local_body or (global_body < 0 and local_body < 0):
-                                    continue
-                                if self._test_group_pair(global_group, collision_groups[local_shape]):
-                                    pair = (global_shape, local_shape)
-                                    if pair not in global_local_filters:
-                                        global_local_pairs.append(pair)
-
-                        local_pairs = []
-                        for i1, shape_a in enumerate(local_colliding_indices):
-                            group_a = collision_groups[shape_a]
-                            body_a = world_shape_bodies[shape_a]
-                            for shape_b in local_colliding_indices[i1 + 1 :]:
-                                body_b = world_shape_bodies[shape_b]
-                                # Same-body and static-static shape pairs are inherently filtered.
-                                if body_a == body_b or (body_a < 0 and body_b < 0):
-                                    continue
-                                if not self._test_group_pair(group_a, collision_groups[shape_b]):
-                                    continue
-
-                                pair = (shape_a, shape_b)
-                                if pair not in local_filters:
-                                    local_pairs.append(pair)
-
-                        cached_pairs = (
-                            np.asarray(global_local_pairs, dtype=np.int32).reshape((-1, 2)),
-                            np.asarray(local_pairs, dtype=np.int32).reshape((-1, 2)),
-                        )
-                        template_cache[cache_key] = cached_pairs
-
-                    # Group runs of consecutive worlds sharing one template so
-                    # the replay below is a broadcast add per run, not a Python
-                    # loop over millions of per-world tuples.
-                    if template_runs and template_runs[-1][1] is cached_pairs:
-                        template_runs[-1][0].append(world_start)
-                    else:
-                        template_runs.append(([world_start], cached_pairs))
-
-                chunks = []
-                if contact_pairs:
-                    chunks.append(np.asarray(contact_pairs, dtype=np.int32).reshape((-1, 2)))
-                for starts, (global_local_pairs, local_pairs) in template_runs:
-                    offsets = np.asarray(starts, dtype=np.int32)
-                    global_count = global_local_pairs.shape[0]
-                    pairs_per_world = global_count + local_pairs.shape[0]
-                    if pairs_per_world == 0:
-                        continue
-                    replay = np.empty((offsets.shape[0], pairs_per_world, 2), dtype=np.int32)
-                    if global_count:
-                        global_replay = replay[:, :global_count, :]
-                        global_replay[:, :, 0] = global_local_pairs[:, 0]
-                        # Cached global/local pairs hold an absolute global id
-                        # and a world-local id shifted per world during replay.
-                        global_replay[:, :, 1] = global_local_pairs[:, 1] + offsets[:, None]
-                        global_replay.sort(axis=2)
-                    if pairs_per_world > global_count:
-                        replay[:, global_count:, :] = local_pairs[None, :, :] + offsets[:, None, None]
-                    chunks.append(replay.reshape((-1, 2)))
-
-                if chunks:
-                    pair_array = np.concatenate(chunks, axis=0)
-                else:
-                    pair_array = np.empty((0, 2), dtype=np.int32)
-                model.shape_contact_pairs = wp.array(pair_array, dtype=wp.vec2i, device=model.device)
-                model.shape_contact_pair_count = len(pair_array)
-                return
-
-        contact_pairs: list[tuple[int, int]] = []
-        shape_body = _list_for_iteration(shape_body_values)
-        shape_world = self.shape_world
-        shape_collision_group = self.shape_collision_group
-
-        # Keep only colliding shapes (those with COLLIDE_SHAPES flag) and sort by world for optimization
-        colliding_indices = [i for i, flag in enumerate(self.shape_flags) if flag & ShapeFlags.COLLIDE_SHAPES]
-        sorted_indices = sorted(colliding_indices, key=shape_world.__getitem__)
-
-        # Iterate over all pairs of colliding shapes
-        for i1 in range(len(sorted_indices)):
-            s1 = sorted_indices[i1]
-            world1 = shape_world[s1]
-            body1 = shape_body[s1]
-            collision_group1 = shape_collision_group[s1]
-
-            for i2 in range(i1 + 1, len(sorted_indices)):
-                s2 = sorted_indices[i2]
-                world2 = shape_world[s2]
-                collision_group2 = shape_collision_group[s2]
-
-                # Early break optimization: if both shapes are in non-global worlds and different worlds,
-                # they can never collide. Since shapes are sorted by world, all remaining shapes will also
-                # be in different worlds, so we can break early.
-                if world1 != -1 and world2 != -1 and world1 != world2:
-                    break
-
-                body2 = shape_body[s2]
-                # Same-body and static-static shape pairs are inherently filtered.
-                if body1 == body2 or (body1 < 0 and body2 < 0):
-                    continue
-
-                if not self._test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
-                    continue
-
-                if s1 > s2:
-                    shape_a, shape_b = s2, s1
-                else:
-                    shape_a, shape_b = s1, s2
-
-                contact_pairs.append((shape_a, shape_b))
-
-        # Drop explicitly filtered pairs with one bulk query instead of a
-        # per-pair membership test inside the candidate loop.
-        candidate_pairs = np.asarray(contact_pairs, dtype=np.int32).reshape((-1, 2))
-        if candidate_pairs.shape[0] > 0:
-            filtered = model.shape_collision_filter_mask(candidate_pairs)
-            candidate_pairs = candidate_pairs[~filtered]
-
-        model.shape_contact_pairs = wp.array(candidate_pairs, dtype=wp.vec2i, device=model.device)
-        model.shape_contact_pair_count = len(candidate_pairs)
+        count = int(sum(np.count_nonzero(valid) for _, _, valid in blocks()))
+        pairs = np.empty((count, 2), dtype=np.int32)
+        offset = 0
+        for start, cols, valid in blocks():
+            shape_a = np.repeat(indices[start : start + valid.shape[0]], np.count_nonzero(valid, axis=1))
+            shape_b = np.broadcast_to(indices[cols], valid.shape)[valid]
+            end = offset + len(shape_a)
+            pairs[offset:end, 0] = np.minimum(shape_a, shape_b)
+            pairs[offset:end, 1] = np.maximum(shape_a, shape_b)
+            offset = end
+        model.shape_contact_pairs = wp.array(pairs, dtype=wp.vec2i, device=model.device)
+        model.shape_contact_pair_count = count
 
 
 _ArrayBackedListDescriptor = tuple[Literal["ctypes", "tuple", "list", "ndarray", "scalar"], Any]
