@@ -18,6 +18,7 @@ from collections import Counter, deque
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import numpy as np
@@ -14291,42 +14292,99 @@ class ModelBuilder:
         groups = groups[indices]
         row_ends = np.searchsorted(worlds, worlds, side="right")
         row_ends[worlds == -1] = len(indices)
-        width_max = np.max(row_ends - np.arange(len(indices)) - 1, initial=1)
-        # Batch more rows when each row has few world-compatible candidates.
-        block_size = max(128, 65536 // width_max)
 
-        def blocks():
-            for start in range(0, len(indices), block_size):
-                stop = min(start + block_size, len(indices))
-                rows = np.arange(start, stop)[:, None]
-                ends = row_ends[start:stop, None]
-                width = int((ends - rows - 1).max())
-                # Broadcast columns shared by rows in the same world.
-                if np.all(ends == ends[0]):
-                    ends = ends[:1]
-                cols = ends - np.arange(width, 0, -1)[None, :]
+        inverse = np.full(self.shape_count, -1, dtype=np.int32)
+        inverse[indices] = np.arange(len(indices), dtype=np.int32)
+        excluded = inverse[model.shape_collision_filter_pairs_array()]
+        excluded.sort(axis=1)
+        excluded = excluded[(excluded[:, 0] >= 0) & (excluded[:, 0] < excluded[:, 1])]
+        excluded = excluded[excluded[:, 1] < row_ends[excluded[:, 0]]]
+        excluded = excluded[np.argsort(excluded[:, 0], kind="stable")]
+
+        def blocks(start, stop, end, filters):
+            starts = np.arange(start, stop, 128)
+            filter_starts = np.searchsorted(filters[:, 0], np.append(starts, stop))
+            for i, row in enumerate(starts):
+                rows = np.arange(row, min(row + 128, stop), dtype=np.int32)[:, None]
+                cols = np.arange(row + 1, end, dtype=np.int32)[None, :]
                 body_a, body_b = bodies[rows], bodies[cols]
                 group_a, group_b = groups[rows], groups[cols]
                 valid = rows < cols
                 valid &= body_a != body_b
                 valid &= (body_a >= 0) | (body_b >= 0)
                 valid &= np.where(group_a > 0, (group_a == group_b) | (group_b < 0), group_a != group_b)
-                if model.shape_collision_filter_pairs:
-                    a, b = np.nonzero(valid)
-                    pairs = np.column_stack((indices[start + a], indices[np.broadcast_to(cols, valid.shape)[a, b]]))
-                    valid[a, b] = ~model.shape_collision_filter_mask(pairs)
-                yield start, cols, valid
+                a, b = filters[filter_starts[i] : filter_starts[i + 1]].T
+                valid[a - row, b - row - 1] = False
+                yield row, valid
 
-        count = int(sum(np.count_nonzero(valid) for _, _, valid in blocks()))
+        starts = np.concatenate(([0], np.flatnonzero(worlds[1:] != worlds[:-1]) + 1, [len(indices)]))
+        filter_starts = np.searchsorted(excluded[:, 0], starts)
+        cache = {}
+        runs = []
+        count = 0
+        for i, (start, stop) in enumerate(pairwise(starts)):
+            if start == stop:
+                continue
+            filters = excluded[filter_starts[i] : filter_starts[i + 1]]
+            end = int(row_ends[start])
+            if worlds[start] == -1:
+                template = None
+                key = None
+            else:
+                local_bodies = bodies[start:stop]
+                attached = local_bodies >= 0
+                origin = local_bodies[attached].min(initial=self.body_count)
+                key = (
+                    groups[start:stop].tobytes(),
+                    np.where(attached, local_bodies - origin, -1).tobytes(),
+                    (filters - start).tobytes(),
+                )
+                template = cache.get(key)
+            if template is None:
+                pair_count = int(sum(np.count_nonzero(valid) for _, valid in blocks(start, stop, end, filters)))
+                template = (start, stop, end, filters, pair_count)
+                if key is not None:
+                    cache[key] = template
+            count += template[4]
+            if runs and runs[-1][1] is template:
+                runs[-1][0].append(start)
+            else:
+                runs.append(([start], template))
+
         pairs = np.empty((count, 2), dtype=np.int32)
+        templates = {}
         offset = 0
-        for start, cols, valid in blocks():
-            shape_a = np.repeat(indices[start : start + valid.shape[0]], np.count_nonzero(valid, axis=1))
-            shape_b = np.broadcast_to(indices[cols], valid.shape)[valid]
-            end = offset + len(shape_a)
-            pairs[offset:end, 0] = np.minimum(shape_a, shape_b)
-            pairs[offset:end, 1] = np.maximum(shape_a, shape_b)
-            offset = end
+        for starts, (start, stop, end, filters, pair_count) in runs:
+            if pair_count == 0:
+                continue
+            output = pairs[offset : offset + len(starts) * pair_count].reshape((-1, pair_count, 2))
+            cached = templates.get(start)
+            if cached is None:
+                # Keep the first world's slice as a template until all replays finish.
+                cached = output[0]
+                cursor = 0
+                for row, valid in blocks(start, stop, end, filters):
+                    a = np.repeat(np.arange(row, row + valid.shape[0], dtype=np.int32), np.count_nonzero(valid, axis=1))
+                    b = np.broadcast_to(np.arange(row + 1, end, dtype=np.int32), valid.shape)[valid]
+                    cached[cursor : cursor + len(a), 0] = a
+                    cached[cursor : cursor + len(a), 1] = b
+                    cursor += len(a)
+                templates[start] = cached
+                replay = output[1:]
+                offsets = np.asarray(starts[1:], dtype=np.int32) - start
+            else:
+                replay = output
+                offsets = np.asarray(starts, dtype=np.int32) - start
+            np.add(cached[None, :, :], offsets[:, None, None], out=replay)
+            offset += len(starts) * pair_count
+
+        # Resolve compressed world-sorted indices only after every template replay.
+        if not np.array_equal(indices, np.arange(len(indices), dtype=np.int32)):
+            for start in range(0, count, 131072):
+                output = pairs[start : start + 131072]
+                mapped = indices[output]
+                output[:, 0] = np.minimum(mapped[:, 0], mapped[:, 1])
+                output[:, 1] = np.maximum(mapped[:, 0], mapped[:, 1])
         model.shape_contact_pairs = wp.array(pairs, dtype=wp.vec2i, device=model.device)
         model.shape_contact_pair_count = count
 
