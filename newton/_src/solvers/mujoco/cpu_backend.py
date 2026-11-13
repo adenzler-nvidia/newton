@@ -91,8 +91,9 @@ class MuJoCoCPUBackend:
         self._scratch: Any = None
         self._options = [model.opt for model in self.models]
         self._model_views: dict[str, list[np.ndarray]] = {}
-        # Worlds whose model changed since its constants were computed.
+        # Worlds whose model changed since its constants were computed, and the fields the constants depend on.
         self._const_stale = np.zeros(nworld, dtype=bool)
+        self._const_inputs = frozenset(getattr(mujoco.MjModel, "_setconst_inputs", ()))
         self._timestep: float | None = None
         # Newton only defines the size components that a geom's collision shape uses. MuJoCo compiles
         # the others for rendering, such as a plane's extent and grid spacing, or from mesh bounds.
@@ -204,7 +205,8 @@ class MuJoCoCPUBackend:
                 changed &= mask
             shared = values.shape[0] == 1
             worlds = changed.reshape(self.nworld, -1).any(axis=1)
-            self._const_stale |= worlds
+            if name in self._const_inputs or not self._const_inputs:
+                self._const_stale |= worlds
             for world in np.flatnonzero(worlds):
                 np.copyto(views[world], values[0 if shared else world], where=changed[world])
 
@@ -245,14 +247,16 @@ class MuJoCoCPUBackend:
 
     def set_options(self, options: dict[str, np.ndarray]) -> None:
         """Set ``MjOption`` fields from one value per world, or a single value shared by all worlds."""
-        self._const_stale[:] = True
         for name, values in options.items():
             for world, option in enumerate(self._options):
                 value = values[world % values.shape[0]]
+                # A non-positive impratio keeps MuJoCo's value, as on MuJoCo Warp.
+                if np.array_equal(getattr(option, name), value) or (name == "impratio" and value <= 0.0):
+                    continue
+                self._const_stale[world] = True
                 if value.ndim:
                     getattr(option, name)[:] = value
-                # A non-positive impratio keeps MuJoCo's value, as on MuJoCo Warp.
-                elif name != "impratio" or value > 0.0:
+                else:
                     setattr(option, name, float(value))
 
     def flush(self) -> None:
