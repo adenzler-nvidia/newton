@@ -924,10 +924,8 @@ models, so construction and
 :meth:`~newton.solvers.SolverMuJoCo.notify_model_changed` support the same
 per-world properties on both backends.
 :meth:`~newton.solvers.SolverMuJoCo.reset` clears the native buffers of the
-selected worlds only. ``solver.mj_model`` is the first world's model. The
-batch owns the simulation state, so ``solver.mj_data`` is a copy of the first
-world's data, refreshed after every step; writing to it does not change the
-simulation.
+selected worlds only. ``solver.mj_model`` and ``solver.mj_data`` are the first
+world's model and data.
 
 
 Runtime state synchronization

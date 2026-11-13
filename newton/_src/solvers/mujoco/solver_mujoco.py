@@ -4521,8 +4521,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             magnetic: Global magnetic flux vector (x, y, z). If None, uses model custom attribute or MuJoCo's default (0, -0.5, 0).
             use_mujoco_cpu: If True, use MuJoCo's C implementation instead of `mujoco_warp`. Each world gets its
                 own native ``MjModel`` with per-world model properties, as with `mujoco_warp`, and a
-                ``mujoco.batch.Batch`` steps the worlds. ``mj_model`` is the first world's model, and ``mj_data``
-                a copy of its data that is refreshed after every step.
+                ``mujoco.batch.Batch`` steps the worlds. ``mj_model`` and ``mj_data`` are the first world's.
             nthread: Number of threads that step the worlds with ``use_mujoco_cpu=True``, at most one per world.
                 If None, MuJoCo uses every CPU.
             enable_multiccd: If True, enable multi-CCD contact generation (up to 4 contact points per geom pair instead of 1). If False, disable it. If None, use the model custom attribute or disable it by default. Note: geom pairs where either geom has ``margin > 0`` always produce a single contact regardless of this flag. With the MuJoCo Warp backend and ``use_mujoco_contacts=True``, all geom and pair margins are zeroed when the model has box geoms and NATIVECCD (the default) or multi-CCD is enabled, or has mesh geoms and multi-CCD is enabled; see *Margin zeroing* in the MuJoCo solver docs. The CPU backend keeps them.
@@ -5326,7 +5325,6 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             # The native worlds own these buffers; MuJoCo Warp's copies only stage the next step's inputs.
             worlds = None if world_mask is None else np.flatnonzero(world_mask.numpy()[: d.nworld])
             self._cpu.reset(worlds)
-            self._cpu.refresh()
 
         buffers = (d.qacc_warmstart, d.qfrc_applied, d.ctrl, d.act, d.xfrc_applied)
         buffer_dim = max(buffer.shape[1] for buffer in buffers)
@@ -5899,7 +5897,6 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
 
         if self._cpu is not None:
             self._cpu.flush()
-            self._cpu.refresh()
             return
 
         if flags & ModelFlags.SHAPE_PROPERTIES:
@@ -9091,12 +9088,15 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 site_to_shape_idx[site_idx] = shape
 
         # MuJoCo orders compiled pairs by their bodies, so match them to Newton pairs by their geoms.
-        pair_geoms = {
-            frozenset(mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_GEOM, name) for name in names): pair
-            for pair, *names in self._spec_pairs
-        }
+        # Pairs of the same geoms keep their order.
+        pair_geoms: dict[frozenset, list[int]] = {}
+        for pair, *names in self._spec_pairs:
+            geoms = frozenset(mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_GEOM, name) for name in names)
+            pair_geoms.setdefault(geoms, []).append(pair)
         compiled_pairs = np.stack((self.mj_model.pair_geom1, self.mj_model.pair_geom2), axis=1)
-        pair_to_newton_template = np.array([pair_geoms[frozenset(geoms)] for geoms in compiled_pairs], dtype=np.int32)
+        pair_to_newton_template = np.array(
+            [pair_geoms[frozenset(geoms)].pop(0) for geoms in compiled_pairs], dtype=np.int32
+        )
 
         with wp.ScopedDevice(model.device):
             # create the MuJoCo Warp model

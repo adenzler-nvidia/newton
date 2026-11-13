@@ -8602,8 +8602,10 @@ class TestMuJoCoOptions(unittest.TestCase):
         state_out = model.state()
         control = model.control()
         control.joint_f.fill_(1.0)
+        # Native state written between steps takes effect, as it did before worlds were batched.
+        solver.mj_data.time = 5.0
         solver.step(model.state(), state_out, control, contacts, 0.01, observables=observables)
-        self.assertEqual(solver.mj_data.time, 0.01)
+        self.assertEqual(solver.mj_data.time, 5.01)
         np.testing.assert_allclose(state_out.joint_q.numpy(), solver.mj_data.qpos, atol=1e-6)
         np.testing.assert_allclose(state_out.joint_qd.numpy(), solver.mj_data.qvel, atol=1e-6)
         self.assertGreater(np.abs(state_out.joint_qd.numpy()).max(), 0.0)
@@ -8750,7 +8752,6 @@ class TestMuJoCoOptions(unittest.TestCase):
                 control = model.control()
                 solver._apply_mjc_control(model, state_in, control)
                 solver._update_mjc_data(model, state_in)
-                solver._cpu.refresh()
                 data = deepcopy(solver.mj_data)
                 solver.mj_model.opt.timestep = 0.005
                 mujoco.mj_forward(solver.mj_model, data)
@@ -9556,7 +9557,6 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
                 w_world_newton = state.body_qd.numpy()[child][3:6].copy()
 
                 native._update_mjc_data(model, state)
-                native._cpu.refresh()
                 mujoco.mj_forward(native.mj_model, native.mj_data)
                 mj_pos = np.array(native.mj_data.xpos[mj_body_id], dtype=np.float64)
                 mj_quat_wxyz = np.array(native.mj_data.xquat[mj_body_id], dtype=np.float64)
@@ -9640,7 +9640,6 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
                 omega_world_newton = state_out.body_qd.numpy()[child][3:6]
 
                 native._update_mjc_data(model, state_out)
-                native._cpu.refresh()
                 mujoco.mj_forward(native.mj_model, native.mj_data)
                 vel = np.zeros(6, dtype=np.float64)
                 mujoco.mj_objectVelocity(native.mj_model, native.mj_data, mujoco.mjtObj.mjOBJ_BODY, mj_body_id, vel, 0)
@@ -10043,6 +10042,7 @@ class TestMuJoCoSolverPairProperties(unittest.TestCase):
             <contact>
                 <pair geom1="floor" geom2="second_geom" friction="0.9 0.9 0.01 0.0001 0.0001"/>
                 <pair geom1="floor" geom2="first_geom" friction="0.2 0.2 0.01 0.0001 0.0001"/>
+                <pair geom1="floor" geom2="second_geom" friction="0.5 0.5 0.01 0.0001 0.0001"/>
             </contact>
         </mujoco>"""
         template = newton.ModelBuilder()
@@ -10052,16 +10052,17 @@ class TestMuJoCoSolverPairProperties(unittest.TestCase):
         SolverMuJoCo.register_custom_attributes(builder)
         builder.replicate(template, 2)
         model = builder.finalize()
-        # World 1 doubles the friction of both pairs at runtime.
+        # World 1 doubles the friction of its pairs at runtime.
         friction = model.mujoco.pair_friction.numpy()
-        friction[2:, 0] *= 2.0
+        friction[3:, 0] *= 2.0
         for use_mujoco_cpu in (False, True):
             with self.subTest(use_mujoco_cpu=use_mujoco_cpu):
                 solver = SolverMuJoCo(model, use_mujoco_cpu=use_mujoco_cpu)
                 names = [solver.mj_model.geom(geom).name for geom in range(solver.mj_model.ngeom)]
                 second = next(geom for geom, name in enumerate(names) if "second_geom" in name)
-                expected = np.where(solver.mj_model.pair_geom2 == second, 0.9, 0.2)
-                self.assertEqual(sorted(expected), [0.2, 0.9])
+                # The two pairs of the second geom keep their authored order.
+                expected = np.full(3, 0.2)
+                expected[solver.mj_model.pair_geom2 == second] = (0.9, 0.5)
                 np.testing.assert_allclose(solver.mj_model.pair_friction[:, 0], expected)
                 model.mujoco.pair_friction.assign(friction)
                 solver.notify_model_changed(ModelFlags.SHAPE_PROPERTIES)
@@ -15780,11 +15781,14 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
         state_0, state_1 = model.state(), model.state()
         for _ in range(250):
-            solver.step(state_0, state_1, None, contacts, 0.002, observables=observables)
+            solver.step(state_0, state_1, None, None, 0.002)
             state_0, state_1 = state_1, state_0
+        # The first export must already see the step's contacts.
+        solver.step(state_0, state_1, None, contacts, 0.002, observables=observables)
 
         count = int(contacts.rigid_contact_count.numpy()[0])
-        self.assertEqual(count, solver._cpu.contact_count())
+        self.assertEqual(count, sum(data.ncon for _, data in solver._cpu.worlds()))
+        self.assertGreaterEqual(count, 3 * self.WORLD_COUNT)
         shape_world = model.shape_world.numpy()
         shape1 = contacts.rigid_contact_shape1.numpy()[:count]
         contact_world = np.maximum(shape_world[contacts.rigid_contact_shape0.numpy()[:count]], shape_world[shape1])

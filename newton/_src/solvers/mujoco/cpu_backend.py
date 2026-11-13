@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -65,7 +65,8 @@ class MuJoCoCPUBackend:
     differs between the backends.
 
     The batch owns every world's state and steps it on that world's model, so writes to
-    the models take effect. The solver's ``mj_data`` is a copy of the first world's data.
+    the models take effect. The solver's ``mj_data`` is a copy of the first world's data
+    whose state is read back before every step, so writes to it take effect as well.
     """
 
     def __init__(
@@ -83,12 +84,10 @@ class MuJoCoCPUBackend:
         self.batch = batch.Batch(mj_model, nworld, nthread, persistent=True)
         """The simulations, which run on :attr:`models`; state fields are bound per world."""
         self.batch.set_models(self.models)
-        state = np.empty(self.batch.nstate)
-        mujoco.mj_getState(mj_model, mj_data, state, mujoco.mjtState.mjSTATE_INTEGRATION)
-        self.batch.state[:] = state
         # Copies of each world's data for MuJoCo functions the batch does not run; the first is the solver's.
         self._data = [mj_data]
-        self._data_stale = False
+        self._read_first_state()
+        self.batch.state[1:] = self.batch.state[0]
         self._scratch: Any = None
         self._options = [model.opt for model in self.models]
         self._model_views: dict[str, list[np.ndarray]] = {}
@@ -129,16 +128,28 @@ class MuJoCoCPUBackend:
 
     def step(self) -> None:
         """Advance every world by one timestep."""
-        # The batch requires its models to be set again after they were edited.
-        self.batch.set_models(self.models)
-        self.batch.step()
-        self._refresh_data()
+        self._call(self.batch.step)
 
     def forward(self) -> None:
         """Run the forward dynamics of every world; a following :meth:`step` continues from them."""
+        self._call(self.batch.forward)
+
+    def _call(self, run: Callable[[], None]) -> None:
+        # The batch requires its models to be set again after they were edited.
         self.batch.set_models(self.models)
-        self.batch.forward()
-        self._refresh_data()
+        self._read_first_state()
+        run()
+        self.batch.get_data(0, self._data[0])
+
+    def _read_first_state(self) -> None:
+        """Take the first world's state from the solver's ``mj_data``, which callers may have written."""
+        integration = self._mujoco.mjtState.mjSTATE_INTEGRATION
+        self._mujoco.mj_getState(self.models[0], self._data[0], self.batch.state[0], integration)
+
+    def _write_first_state(self) -> None:
+        """Show the first world's state in the solver's ``mj_data``."""
+        integration = self._mujoco.mjtState.mjSTATE_INTEGRATION
+        self._mujoco.mj_setState(self.models[0], self._data[0], self.batch.state[0], integration)
 
     def set_const(self) -> None:
         """Recompute the model constants of the worlds whose model changed and read the ones Newton's kernels use."""
@@ -152,26 +163,17 @@ class MuJoCoCPUBackend:
 
     def reset(self, worlds: Sequence[int] | None = None) -> None:
         """Clear the buffers that persist between steps in the selected worlds."""
+        self._read_first_state()
         for name in _RESET_FIELDS:
             self.batch.bind(name)[slice(None) if worlds is None else worlds] = 0.0
-        self._data_stale = True
-
-    def refresh(self) -> None:
-        """Update the solver's ``mj_data`` after writes to the first world's state."""
-        if self._data_stale:
-            self._refresh_data()
-
-    def _refresh_data(self) -> None:
-        self.batch.get_data(0, self._data[0])
-        self._data_stale = False
+        self._write_first_state()
 
     def worlds(self) -> list[tuple[Any, Any]]:
         """Return every world's model and a copy of its data, which the next step outdates."""
         for _ in range(len(self._data), self.nworld):
             self._data.append(self._mujoco.MjData(self.models[0]))
-        for world in range(self.nworld):
+        for world in range(1, self.nworld):
             self.batch.get_data(world, self._data[world])
-        self._data_stale = False
         return list(zip(self.models, self._data, strict=True))
 
     # ------------------------------------------------------------------
@@ -219,11 +221,12 @@ class MuJoCoCPUBackend:
     def push_data(self, names: Iterable[str], worlds: Sequence[int] | None = None) -> None:
         """Copy MuJoCo Warp data fields to the native state of the selected worlds."""
         rows = slice(None) if worlds is None else worlds
+        self._read_first_state()
         for name in names:
             native = self.batch.bind(name)
             if native.size:
                 native[rows] = self._host.read(getattr(self._mjw_data, name)).reshape(native.shape)[rows]
-        self._data_stale = True
+        self._write_first_state()
 
     def pull_data(self, names: Iterable[str]) -> None:
         """Copy native data fields of every world to the MuJoCo Warp data."""
