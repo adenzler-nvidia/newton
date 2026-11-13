@@ -795,11 +795,11 @@ def test_restitution_mujoco(test, device, solver_fn, use_mujoco_cpu):
     # geom 0: ground, geom 1: elastic sphere, geom 2: inelastic sphere.
     # Set sphere priority > ground so the sphere's solref controls each contact.
     if use_mujoco_cpu:
-        solver._cpu.batch.expand("geom_solref")[:, 0] = solref_elastic
-        solver._cpu.batch.expand("geom_solref")[:, 1] = solref_elastic
-        solver._cpu.batch.expand("geom_solref")[:, 2] = solref_inelastic
-        solver._cpu.batch.expand("geom_priority")[:, 1] = 1
-        solver._cpu.batch.expand("geom_priority")[:, 2] = 1
+        solver.mj_model.geom_solref[0] = solref_elastic
+        solver.mj_model.geom_solref[1] = solref_elastic
+        solver.mj_model.geom_solref[2] = solref_inelastic
+        solver.mj_model.geom_priority[1] = 1
+        solver.mj_model.geom_priority[2] = 1
     else:
         sr = solver.mjw_model.geom_solref.numpy()
         sr[0, 0] = solref_elastic
@@ -988,7 +988,7 @@ def test_fourbar_linkage(test, device, solver_fn, use_loop_joint=False):
     solver = solver_fn(model)
     # Stiffen equality constraint for tight loop closure
     if solver.use_mujoco_cpu:
-        solver._cpu.batch.expand("eq_solref")[:] = [0.001, 1.0]
+        solver.mj_model.eq_solref[:] = [0.001, 1.0]
     else:
         sr = solver.mjw_model.eq_solref.numpy()
         sr[:] = [0.001, 1.0]
@@ -1205,8 +1205,8 @@ def test_revolute_loop_joint(test, device, solver_fn):
     solver = solver_fn(model)
 
     if solver.use_mujoco_cpu:
-        solver._cpu.batch.expand("eq_solref")[:] = [0.001, 1.0]
-        solver._cpu.batch.expand("opt.gravity")[:] = [0.0, -9.81, -5.0]
+        solver.mj_model.eq_solref[:] = [0.001, 1.0]
+        solver.mj_model.opt.gravity[:] = [0.0, -9.81, -5.0]
     else:
         sr = solver.mjw_model.eq_solref.numpy()
         sr[:] = [0.001, 1.0]
@@ -1326,7 +1326,7 @@ def test_ball_loop_joint(test, device, solver_fn):
     solver = solver_fn(model)
 
     if solver.use_mujoco_cpu:
-        solver._cpu.batch.expand("eq_solref")[:] = [0.001, 1.0]
+        solver.mj_model.eq_solref[:] = [0.001, 1.0]
     else:
         sr = solver.mjw_model.eq_solref.numpy()
         sr[:] = [0.001, 1.0]
@@ -1469,7 +1469,7 @@ def test_fixed_loop_joint(test, device, solver_fn):
     solver = solver_fn(model)
 
     if solver.use_mujoco_cpu:
-        solver._cpu.batch.expand("eq_solref")[:] = [0.001, 1.0]
+        solver.mj_model.eq_solref[:] = [0.001, 1.0]
     else:
         sr = solver.mjw_model.eq_solref.numpy()
         sr[:] = [0.001, 1.0]

@@ -56,87 +56,16 @@ class _HostArrays:
             array.assign(values.reshape(*array.shape, *getattr(array.dtype, "_shape_", ())))
 
 
-def _quat_to_mat(quat: np.ndarray) -> np.ndarray:
-    """Convert unit quaternions ``[..., 4]`` (wxyz) to rotation matrices ``[..., 3, 3]``."""
-    w, x, y, z = np.moveaxis(quat, -1, 0)
-    mat = np.empty((*quat.shape[:-1], 3, 3))
-    mat[..., 0, 0] = 1.0 - 2.0 * (y * y + z * z)
-    mat[..., 0, 1] = 2.0 * (x * y - w * z)
-    mat[..., 0, 2] = 2.0 * (x * z + w * y)
-    mat[..., 1, 0] = 2.0 * (x * y + w * z)
-    mat[..., 1, 1] = 1.0 - 2.0 * (x * x + z * z)
-    mat[..., 1, 2] = 2.0 * (y * z - w * x)
-    mat[..., 2, 0] = 2.0 * (x * z - w * y)
-    mat[..., 2, 1] = 2.0 * (y * z + w * x)
-    mat[..., 2, 2] = 1.0 - 2.0 * (x * x + y * y)
-    return mat
-
-
-class _BodyBVH:
-    """Topology of the compiled per-body midphase trees, which is the same in every world."""
-
-    def __init__(self, m: Any):
-        bodies = np.flatnonzero(m.body_bvhnum)
-        counts = m.body_bvhnum[bodies]
-        node_body = np.repeat(bodies, counts)
-        # Each body's nodes are contiguous; children are indexed within their body's tree.
-        first = np.cumsum(counts) - counts
-        local = np.arange(node_body.size) - np.repeat(first, counts)
-        self.nodes = np.repeat(m.body_bvhadr[bodies], counts) + local
-        nodeid = m.bvh_nodeid[self.nodes]
-        leaf = nodeid >= 0
-        self.leaves = np.flatnonzero(leaf)
-        self.leaf_geom = nodeid[leaf]
-        self.leaf_body = node_body[leaf]
-        offset = np.repeat(first, counts)
-        child = m.bvh_child[self.nodes]
-        self.child = np.where(child >= 0, child + offset[:, None], -1)
-        depth = m.bvh_depth[self.nodes]
-        internal = np.flatnonzero(~leaf)
-        # Deepest first, so every node is refit after its children.
-        self.levels = [internal[depth[internal] == d] for d in np.unique(depth[internal])[::-1]]
-
-    def boxes(
-        self,
-        geom_pos: np.ndarray,
-        geom_quat: np.ndarray,
-        geom_aabb: np.ndarray,
-        body_ipos: np.ndarray,
-        body_iquat: np.ndarray,
-    ) -> np.ndarray:
-        """Return the midphase boxes ``[nworld, node, 6]`` of geom bounds and poses in the body inertial frames.
-
-        ``mj_collideTree`` assumes these boxes, which MuJoCo only computes when compiling.
-        """
-        geom, body = self.leaf_geom, self.leaf_body
-        imat = _quat_to_mat(body_iquat[:, body])
-        gmat = _quat_to_mat(geom_quat[:, geom])
-        aabb = geom_aabb[:, geom]
-        center = geom_pos[:, geom] + np.einsum("wnij,wnj->wni", gmat, aabb[..., :3]) - body_ipos[:, body]
-        center = np.einsum("wnji,wnj->wni", imat, center)
-        half = np.einsum("wnij,wnj->wni", np.abs(np.einsum("wnji,wnjk->wnik", imat, gmat)), aabb[..., 3:])
-        lower = np.full((geom_pos.shape[0], self.nodes.size, 3), np.inf)
-        upper = np.full((geom_pos.shape[0], self.nodes.size, 3), -np.inf)
-        lower[:, self.leaves] = center - half
-        upper[:, self.leaves] = center + half
-        for nodes in self.levels:
-            for child in self.child[nodes].T:
-                valid = child >= 0
-                lower[:, nodes[valid]] = np.minimum(lower[:, nodes[valid]], lower[:, child[valid]])
-                upper[:, nodes[valid]] = np.maximum(upper[:, nodes[valid]], upper[:, child[valid]])
-        return np.concatenate((0.5 * (lower + upper), 0.5 * (upper - lower)), axis=-1)
-
-
 class MuJoCoCPUBackend:
-    """Native MuJoCo worlds in a ``mujoco.batch.Batch``, which steps them on a thread pool.
+    """One native ``MjModel`` per world, run by a ``mujoco.batch.Batch`` on a thread pool.
 
     Newton's conversion kernels write the MuJoCo Warp model and data on both backends.
-    This class copies the fields they write to the batch, runs MuJoCo's C functions on
-    it, and copies the results back, so that only the simulation itself differs between
-    the backends.
+    This class copies the fields they write to the native worlds, runs MuJoCo's C
+    functions on them, and copies the results back, so that only the simulation itself
+    differs between the backends.
 
-    The batch owns the simulations. The solver's ``mj_model`` and ``mj_data`` are copies
-    of the first world that are refreshed after every change; writes to them are lost.
+    The batch owns every world's state and steps it on that world's model, so writes to
+    the models take effect. The solver's ``mj_data`` is a copy of the first world's data.
     """
 
     def __init__(
@@ -148,18 +77,22 @@ class MuJoCoCPUBackend:
         self._mjw_model = mjw_model
         self._mjw_data = mjw_data
         self._host = _HostArrays()
+        self.models = [mj_model] + [copy.copy(mj_model) for _ in range(nworld - 1)]
+        """Native model of each world; the first is the solver's ``mj_model``."""
         # One MjData per world, which contact and constraint export reads.
         self.batch = batch.Batch(mj_model, nworld, nthread, persistent=True)
-        """The simulations; state fields are bound and model fields expanded per world."""
+        """The simulations, which run on :attr:`models`; state fields are bound per world."""
+        self.batch.set_models(self.models)
         state = np.empty(self.batch.nstate)
         mujoco.mj_getState(mj_model, mj_data, state, mujoco.mjtState.mjSTATE_INTEGRATION)
         self.batch.state[:] = state
-        # Copies of each world's model and data for MuJoCo functions the batch does not run.
-        self._models = [mj_model]
+        # Copies of each world's data for MuJoCo functions the batch does not run; the first is the solver's.
         self._data = [mj_data]
-        self._models_stale = False
+        self._data_stale = False
+        self._scratch: Any = None
+        self._options = [model.opt for model in self.models]
+        self._model_views: dict[str, list[np.ndarray]] = {}
         self._timestep: float | None = None
-        self._bvh = _BodyBVH(mj_model)
         # Newton only defines the size components that a geom's collision shape uses. MuJoCo compiles
         # the others for rendering, such as a plane's extent and grid spacing, or from mesh bounds.
         geom = mujoco.mjtGeom
@@ -188,57 +121,65 @@ class MuJoCoCPUBackend:
 
     def set_timestep(self, dt: float) -> None:
         if dt != self._timestep:
-            self.batch.expand("opt.timestep")[:] = dt
+            for option in self._options:
+                option.timestep = dt
             self._timestep = dt
-            self._model_changed()
 
     def step(self) -> None:
         """Advance every world by one timestep."""
+        # The batch requires its models to be set again after they were edited.
+        self.batch.set_models(self.models)
         self.batch.step()
-        self._data_changed()
+        self._refresh_data()
 
     def forward(self) -> None:
         """Run the forward dynamics of every world; a following :meth:`step` continues from them."""
+        self.batch.set_models(self.models)
         self.batch.forward()
-        self._data_changed()
+        self._refresh_data()
 
     def set_const(self) -> None:
         """Recompute every world's model constants and read the ones Newton's kernels use."""
         self.flush()
-        self.batch.set_const()
-        self._model_changed()
+        if self._scratch is None:
+            self._scratch = self._mujoco.MjData(self.models[0])
+        for model in self.models:
+            self._mujoco.mj_setConst(model, self._scratch)
         self.pull_model(_SET_CONST_FIELDS)
 
     def reset(self, worlds: Sequence[int] | None = None) -> None:
         """Clear the buffers that persist between steps in the selected worlds."""
         for name in _RESET_FIELDS:
             self.batch.bind(name)[slice(None) if worlds is None else worlds] = 0.0
-        self._data_changed()
+        self._data_stale = True
+
+    def refresh(self) -> None:
+        """Update the solver's ``mj_data`` after writes to the first world's state."""
+        if self._data_stale:
+            self._refresh_data()
+
+    def _refresh_data(self) -> None:
+        self.batch.get_data(0, self._data[0])
+        self._data_stale = False
 
     def worlds(self) -> list[tuple[Any, Any]]:
-        """Return a copy of every world's model and data, which the next change to the batch outdates."""
-        for _ in range(len(self._models), self.nworld):
-            self._models.append(copy.copy(self._models[0]))
-            self._data.append(self._mujoco.MjData(self._models[0]))
-            self._models_stale = True
-        if self._models_stale:
-            for world in range(1, self.nworld):
-                self.batch.get_model(world, self._models[world])
-            self._models_stale = False
-        for world in range(1, self.nworld):
+        """Return every world's model and a copy of its data, which the next step outdates."""
+        for _ in range(len(self._data), self.nworld):
+            self._data.append(self._mujoco.MjData(self.models[0]))
+        for world in range(self.nworld):
             self.batch.get_data(world, self._data[world])
-        return list(zip(self._models, self._data, strict=True))
-
-    def _model_changed(self) -> None:
-        self.batch.get_model(0, self._models[0])
-        self._models_stale = True
-
-    def _data_changed(self) -> None:
-        self.batch.get_data(0, self._data[0])
+        self._data_stale = False
+        return list(zip(self.models, self._data, strict=True))
 
     # ------------------------------------------------------------------
     # Mirroring
     # ------------------------------------------------------------------
+
+    def _views(self, name: str) -> list[np.ndarray]:
+        views = self._model_views.get(name)
+        if views is None:
+            views = self._model_views[name] = [getattr(model, name) for model in self.models]
+        return views
 
     def push_model(self, names: Iterable[str]) -> None:
         """Copy the entries of MuJoCo Warp model fields that differ from the native models.
@@ -247,28 +188,28 @@ class MuJoCoCPUBackend:
         constants that MuJoCo computed in double precision survive unrelated updates.
         """
         for name in names:
-            native = self.batch.expand(name)
-            if not native.size:
+            views = self._views(name)
+            if not views[0].size:
                 continue
             # Fields without a world dimension, or with a single entry, are shared by all worlds.
-            values = self._host.read(getattr(self._mjw_model, name)).reshape(-1, *native.shape[1:])
-            values = np.broadcast_to(values, native.shape)
-            changed = native.astype(values.dtype) != values
+            values = self._host.read(getattr(self._mjw_model, name)).reshape(-1, *views[0].shape)
+            changed = np.stack(views).astype(values.dtype) != values
             mask = self.model_field_masks.get(name)
             if mask is not None:
                 changed &= mask
-            native[changed] = values[changed]
-        self._model_changed()
+            shared = values.shape[0] == 1
+            for world in np.flatnonzero(changed.reshape(self.nworld, -1).any(axis=1)):
+                np.copyto(views[world], values[0 if shared else world], where=changed[world])
 
     def pull_model(self, names: Iterable[str]) -> None:
         """Copy native model fields of every world to the MuJoCo Warp model."""
         for name in names:
-            native = self.model_field(name)
-            if native.size:
+            views = self._views(name)
+            if views[0].size:
                 target = getattr(self._mjw_model, name)
                 # Fields without a world dimension keep the first world's values.
-                shared = target.size * wp.types.type_size(target.dtype) == native[0].size
-                self._host.write(target, native[0] if shared else native)
+                shared = target.size * wp.types.type_size(target.dtype) == views[0].size
+                self._host.write(target, views[0] if shared else np.stack(views))
 
     def push_data(self, names: Iterable[str], worlds: Sequence[int] | None = None) -> None:
         """Copy MuJoCo Warp data fields to the native state of the selected worlds."""
@@ -277,7 +218,7 @@ class MuJoCoCPUBackend:
             native = self.batch.bind(name)
             if native.size:
                 native[rows] = self._host.read(getattr(self._mjw_data, name)).reshape(native.shape)[rows]
-        self._data_changed()
+        self._data_stale = True
 
     def pull_data(self, names: Iterable[str]) -> None:
         """Copy native data fields of every world to the MuJoCo Warp data."""
@@ -296,13 +237,14 @@ class MuJoCoCPUBackend:
 
     def set_options(self, options: dict[str, np.ndarray]) -> None:
         """Set ``MjOption`` fields from one value per world, or a single value shared by all worlds."""
-        for name, option in options.items():
-            native = self.batch.expand(f"opt.{name}")
-            values = np.broadcast_to(option, native.shape)
-            # A non-positive impratio keeps MuJoCo's value, as on MuJoCo Warp.
-            write = values > 0.0 if name == "impratio" else np.ones(native.shape, dtype=bool)
-            native[write] = values[write]
-        self._model_changed()
+        for name, values in options.items():
+            for world, option in enumerate(self._options):
+                value = values[world % values.shape[0]]
+                if value.ndim:
+                    getattr(option, name)[:] = value
+                # A non-positive impratio keeps MuJoCo's value, as on MuJoCo Warp.
+                elif name != "impratio" or value > 0.0:
+                    setattr(option, name, float(value))
 
     def flush(self) -> None:
         """Copy the MuJoCo Warp fields written since the last call to the native worlds."""
@@ -315,23 +257,11 @@ class MuJoCoCPUBackend:
 
     def model_field(self, name: str) -> np.ndarray:
         """Return a native model field of every world, shape ``[nworld, ...]``."""
-        native = self.batch.expanded(name)
-        if native is None:
-            template = getattr(self._models[0], name)
-            native = np.broadcast_to(template, (self.nworld, *template.shape))
-        return native
+        return np.stack(self._views(name))
 
     # ------------------------------------------------------------------
     # Native computations without a MuJoCo Warp array to mirror
     # ------------------------------------------------------------------
-
-    def refit_body_bvh(self) -> None:
-        """Refit every world's midphase boxes after geom bounds, geom poses, or inertial frames changed."""
-        tree = self._bvh
-        if tree.nodes.size:
-            fields = ("geom_pos", "geom_quat", "geom_aabb", "body_ipos", "body_iquat")
-            self.batch.expand("bvh_aabb")[:, tree.nodes] = tree.boxes(*map(self.model_field, fields))
-            self._model_changed()
 
     def resolve_dampratio(self, actuators: Sequence[int], dampratio: np.ndarray) -> None:
         """Resolve ``dampratio`` placeholders into ``actuator_biasprm`` from each world's inertia at ``qpos0``.
@@ -345,9 +275,10 @@ class MuJoCoCPUBackend:
         if not np.any(dampratio[:, list(actuators)] > 0.0):
             return
         self.flush()
-        biasprm = self.batch.expand("actuator_biasprm")
-        for world, (m, d) in enumerate(self.worlds()):
-            ratio = dampratio[world]
+        if self._scratch is None:
+            self._scratch = mujoco.MjData(self.models[0])
+        d = self._scratch
+        for m, ratio in zip(self.models, dampratio, strict=True):
             selected = [a for a in actuators if ratio[a] > 0.0]
             if not selected:
                 continue
@@ -371,17 +302,15 @@ class MuJoCoCPUBackend:
                     mujoco.mj_solveM(m, d, inv_mass_moment, moment)
                     inv_weight += float(moment[0] @ inv_mass_moment[0]) / len(outputs)
                 inertia = 1.0 / inv_weight if inv_weight > MJ_MINVAL else 0.0
-                biasprm[world, actuator, 2] = (
+                m.actuator_biasprm[actuator, 2] = (
                     -ratio[actuator] * 2.0 * np.sqrt(m.actuator_gainprm[actuator, 0] * inertia)
                 )
-        self._model_changed()
-        self._data_changed()
         self.pull_model(("actuator_biasprm",))
 
     def frictionloss_force(self) -> np.ndarray:
         """Return the DOF friction-loss constraint forces of every world, shape ``[nworld, nv]``."""
         friction_dof = self._mujoco.mjtConstraint.mjCNSTR_FRICTION_DOF
-        force = np.zeros((self.nworld, self._models[0].nv), dtype=np.float32)
+        force = np.zeros((self.nworld, self.models[0].nv), dtype=np.float32)
         for world, (_, data) in enumerate(self.worlds()):
             rows = data.efc_type == friction_dof
             force[world, data.efc_id[rows]] = data.efc_force[rows]

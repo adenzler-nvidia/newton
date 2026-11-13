@@ -28,7 +28,6 @@ from newton._src.solvers.mujoco.constants import (
     SOLREF_MODE_MJCF_DEFAULT,
     SOLREF_MODE_RAW,
 )
-from newton._src.solvers.mujoco.cpu_backend import _BodyBVH
 from newton._src.solvers.mujoco.enums import (
     _ActuatorBiasType,
     _ActuatorDynamicsType,
@@ -8751,6 +8750,7 @@ class TestMuJoCoOptions(unittest.TestCase):
                 control = model.control()
                 solver._apply_mjc_control(model, state_in, control)
                 solver._update_mjc_data(model, state_in)
+                solver._cpu.refresh()
                 data = deepcopy(solver.mj_data)
                 solver.mj_model.opt.timestep = 0.005
                 mujoco.mj_forward(solver.mj_model, data)
@@ -9556,6 +9556,7 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
                 w_world_newton = state.body_qd.numpy()[child][3:6].copy()
 
                 native._update_mjc_data(model, state)
+                native._cpu.refresh()
                 mujoco.mj_forward(native.mj_model, native.mj_data)
                 mj_pos = np.array(native.mj_data.xpos[mj_body_id], dtype=np.float64)
                 mj_quat_wxyz = np.array(native.mj_data.xquat[mj_body_id], dtype=np.float64)
@@ -9639,6 +9640,7 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
                 omega_world_newton = state_out.body_qd.numpy()[child][3:6]
 
                 native._update_mjc_data(model, state_out)
+                native._cpu.refresh()
                 mujoco.mj_forward(native.mj_model, native.mj_data)
                 vel = np.zeros(6, dtype=np.float64)
                 mujoco.mj_objectVelocity(native.mj_model, native.mj_data, mujoco.mjtObj.mjOBJ_BODY, mj_body_id, vel, 0)
@@ -15721,6 +15723,7 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         serial = SolverMuJoCo(model, use_mujoco_cpu=True, nthread=1)
         warp = SolverMuJoCo(model)
         self.assertEqual(cpu._cpu.nworld, self.WORLD_COUNT)
+        self.assertIs(cpu._cpu.models[0], cpu.mj_model)
 
         self._randomize(model, seed=2)
         for solver in (cpu, serial, warp):
@@ -15739,12 +15742,9 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
                     self.assertFalse(np.allclose(native[0], native[1]))
                     randomized = getattr(warp.mjw_model, name).numpy().reshape(native.shape)
                     np.testing.assert_allclose(native[used], randomized[used], rtol=1.0e-5)
-        gravity = cpu._cpu.batch.expanded("opt.gravity")
+        gravity = np.stack([m.opt.gravity for m in cpu._cpu.models])
         np.testing.assert_allclose(gravity, model.gravity.numpy()[: self.WORLD_COUNT], rtol=1.0e-6)
-        np.testing.assert_array_equal(cpu._cpu.batch.expanded("opt.impratio"), impratio[: self.WORLD_COUNT])
-        # The solver's native model and data are the first world's.
-        np.testing.assert_array_equal(cpu.mj_model.body_mass, cpu._cpu.model_field("body_mass")[0])
-        np.testing.assert_array_equal(cpu.mj_model.opt.gravity, gravity[0])
+        np.testing.assert_array_equal([m.opt.impratio for m in cpu._cpu.models], impratio[: self.WORLD_COUNT])
 
         kinds = {
             cpu.ObservableKind.BODY_QDD,
@@ -15818,25 +15818,12 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
     def test_shape_updates_reach_native_collision(self):
         """Collide with the shapes that one world moves or resizes at runtime.
 
-        MuJoCo compiles midphase boxes and whether a geom or site shares its
+        MuJoCo caches midphase boxes and whether a geom or site shares its
         body's frame, so the box and site at the body origin, the offset
         sphere, and the capsule exercise different caches.
         """
         model = self._build_model()
         solver = SolverMuJoCo(model, use_mujoco_cpu=True)
-        # The refit reproduces the boxes that MuJoCo compiles for rotated shapes and inertial frames.
-        compiled = solver._mujoco.MjModel.from_xml_string(
-            '<mujoco><worldbody><body pos="0 0 1" quat="0.9 0.1 0.3 0.2"><freejoint/>'
-            '<geom type="box" size=".1 .2 .3" pos=".3 0 0" quat="0.7 0.1 0.6 0.2"/>'
-            '<geom type="capsule" size=".05 .2" pos="0 .4 .1" quat="0.5 0.5 0.5 0.5"/>'
-            '<geom type="sphere" size=".15" pos="-.3 .1 0"/></body></worldbody></mujoco>'
-        )
-        tree = _BodyBVH(compiled)
-        self.assertGreater(tree.nodes.size, 2)
-        fields = ("geom_pos", "geom_quat", "geom_aabb", "body_ipos", "body_iquat")
-        boxes = tree.boxes(*(getattr(compiled, name)[None] for name in fields))
-        np.testing.assert_allclose(boxes[0], compiled.bvh_aabb[tree.nodes], atol=1.0e-12)
-
         # Lower world 0's box and world 1's sphere below their base, and move world 0's site.
         shapes_per_world = (model.shape_count - 1) // self.WORLD_COUNT
         box, sphere, site = 0, shapes_per_world + 1, 3

@@ -4519,10 +4519,10 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             viscosity: Medium viscosity for lift and drag forces. If None, uses model custom attribute or MuJoCo's default (0.0).
             wind: Wind velocity vector (x, y, z) for lift and drag forces. If None, uses model custom attribute or MuJoCo's default (0, 0, 0).
             magnetic: Global magnetic flux vector (x, y, z). If None, uses model custom attribute or MuJoCo's default (0, -0.5, 0).
-            use_mujoco_cpu: If True, use MuJoCo's C implementation instead of `mujoco_warp`. The worlds run in a
-                ``mujoco.batch.Batch`` with per-world model properties, as with `mujoco_warp`. ``mj_model`` and
-                ``mj_data`` are then copies of the first world that are refreshed after every change; writes to them
-                do not reach the simulation.
+            use_mujoco_cpu: If True, use MuJoCo's C implementation instead of `mujoco_warp`. Each world gets its
+                own native ``MjModel`` with per-world model properties, as with `mujoco_warp`, and a
+                ``mujoco.batch.Batch`` steps the worlds. ``mj_model`` is the first world's model, and ``mj_data``
+                a copy of its data that is refreshed after every step.
             nthread: Number of threads that step the worlds with ``use_mujoco_cpu=True``, at most one per world.
                 If None, MuJoCo uses every CPU.
             enable_multiccd: If True, enable multi-CCD contact generation (up to 4 contact points per geom pair instead of 1). If False, disable it. If None, use the model custom attribute or disable it by default. Note: geom pairs where either geom has ``margin > 0`` always produce a single contact regardless of this flag. With the MuJoCo Warp backend and ``use_mujoco_contacts=True``, all geom and pair margins are zeroed when the model has box geoms and NATIVECCD (the default) or multi-CCD is enabled, or has mesh geoms and multi-CCD is enabled; see *Margin zeroing* in the MuJoCo solver docs. The CPU backend keeps them.
@@ -5326,6 +5326,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             # The native worlds own these buffers; MuJoCo Warp's copies only stage the next step's inputs.
             worlds = None if world_mask is None else np.flatnonzero(world_mask.numpy()[: d.nworld])
             self._cpu.reset(worlds)
+            self._cpu.refresh()
 
         buffers = (d.qacc_warmstart, d.qfrc_applied, d.ctrl, d.act, d.xfrc_applied)
         buffer_dim = max(buffer.shape[1] for buffer in buffers)
@@ -5832,7 +5833,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             self._update_pair_properties()
             self._invalidate_contact_fast_path()
             if self._cpu is not None:
-                # Native MuJoCo caches whether a geom or site shares its body's frame, which mj_setConst refreshes.
+                # Native MuJoCo caches midphase boxes and whether a geom or site shares its body's frame.
                 need_const_0 = True
         if flags & ModelFlags.MODEL_PROPERTIES:
             self._update_model_properties()
@@ -5898,8 +5899,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
 
         if self._cpu is not None:
             self._cpu.flush()
-            if flags & (ModelFlags.BODY_INERTIAL_PROPERTIES | ModelFlags.SHAPE_PROPERTIES):
-                self._cpu.refit_body_bvh()
+            self._cpu.refresh()
             return
 
         if flags & ModelFlags.SHAPE_PROPERTIES:
