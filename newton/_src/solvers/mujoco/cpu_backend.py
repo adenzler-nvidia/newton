@@ -99,7 +99,8 @@ class MuJoCoCPUBackend:
         self._host = _HostArrays()
         self.models = [mj_model] + [copy.copy(mj_model) for _ in range(nworld - 1)]
         """Native model of each world; the first is the solver's ``mj_model``."""
-        # One MjData per world, which contact and constraint export reads.
+        # Persistent: one MjData per world, which contact and constraint export reads, and which fields
+        # show as soon as they are bound; otherwise a field bound after a call is zero until the next one.
         self.batch = batch.Batch(mj_model, nworld, nthread, persistent=True)
         """The simulations, which run on :attr:`models`; state fields are bound per world."""
         self.batch.set_models(self.models)
