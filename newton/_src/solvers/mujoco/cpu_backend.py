@@ -92,6 +92,8 @@ class MuJoCoCPUBackend:
         self._scratch: Any = None
         self._options = [model.opt for model in self.models]
         self._model_views: dict[str, list[np.ndarray]] = {}
+        # Worlds whose model changed since its constants were computed.
+        self._const_stale = np.zeros(nworld, dtype=bool)
         self._timestep: float | None = None
         # Newton only defines the size components that a geom's collision shape uses. MuJoCo compiles
         # the others for rendering, such as a plane's extent and grid spacing, or from mesh bounds.
@@ -139,12 +141,13 @@ class MuJoCoCPUBackend:
         self._refresh_data()
 
     def set_const(self) -> None:
-        """Recompute every world's model constants and read the ones Newton's kernels use."""
+        """Recompute the model constants of the worlds whose model changed and read the ones Newton's kernels use."""
         self.flush()
         if self._scratch is None:
             self._scratch = self._mujoco.MjData(self.models[0])
-        for model in self.models:
-            self._mujoco.mj_setConst(model, self._scratch)
+        for world in np.flatnonzero(self._const_stale):
+            self._mujoco.mj_setConst(self.models[world], self._scratch)
+        self._const_stale[:] = False
         self.pull_model(_SET_CONST_FIELDS)
 
     def reset(self, worlds: Sequence[int] | None = None) -> None:
@@ -198,7 +201,9 @@ class MuJoCoCPUBackend:
             if mask is not None:
                 changed &= mask
             shared = values.shape[0] == 1
-            for world in np.flatnonzero(changed.reshape(self.nworld, -1).any(axis=1)):
+            worlds = changed.reshape(self.nworld, -1).any(axis=1)
+            self._const_stale |= worlds
+            for world in np.flatnonzero(worlds):
                 np.copyto(views[world], values[0 if shared else world], where=changed[world])
 
     def pull_model(self, names: Iterable[str]) -> None:
@@ -237,6 +242,7 @@ class MuJoCoCPUBackend:
 
     def set_options(self, options: dict[str, np.ndarray]) -> None:
         """Set ``MjOption`` fields from one value per world, or a single value shared by all worlds."""
+        self._const_stale[:] = True
         for name, values in options.items():
             for world, option in enumerate(self._options):
                 value = values[world % values.shape[0]]
