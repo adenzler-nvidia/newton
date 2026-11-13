@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -122,25 +122,33 @@ class MuJoCoCPUBackend:
     # ------------------------------------------------------------------
 
     def set_timestep(self, dt: float) -> None:
-        if dt != self._timestep:
+        # The first world's model is the solver's, which callers may have written.
+        if dt != self._timestep or self._options[0].timestep != dt:
             for option in self._options:
                 option.timestep = dt
             self._timestep = dt
 
-    def step(self) -> None:
-        """Advance every world by one timestep."""
-        self._call(self.batch.step)
+    def step(self, after_forward: bool = False) -> None:
+        """Advance every world by one timestep.
+
+        Args:
+            after_forward: Continue from the :meth:`forward` pass that was just run.
+        """
+        if not after_forward:
+            self._begin()
+        self.batch.step()
+        self.batch.get_data(0, self._data[0])
 
     def forward(self) -> None:
-        """Run the forward dynamics of every world; a following :meth:`step` continues from them."""
-        self._call(self.batch.forward)
+        """Run the forward dynamics of every world."""
+        self._begin()
+        self.batch.forward()
+        self.batch.get_data(0, self._data[0])
 
-    def _call(self, run: Callable[[], None]) -> None:
-        # The batch requires its models to be set again after they were edited.
+    def _begin(self) -> None:
+        # The batch requires its models to be set again after they were edited, which restarts its solve.
         self.batch.set_models(self.models)
         self._read_first_state()
-        run()
-        self.batch.get_data(0, self._data[0])
 
     def _read_first_state(self) -> None:
         """Take the first world's state from the solver's ``mj_data``, which callers may have written."""
@@ -244,6 +252,12 @@ class MuJoCoCPUBackend:
             self._mujoco.mj_rnePostConstraint(model, data)
         for name in ("cacc", "cfrc_int"):
             self._host.write(getattr(self._mjw_data, name), np.stack([getattr(data, name) for _, data in worlds]))
+
+    def pull_options(self, names: Iterable[str]) -> None:
+        """Copy native option fields of every world to the MuJoCo Warp model."""
+        for name in names:
+            values = np.stack([getattr(option, name) for option in self._options])
+            self._host.write(getattr(self._mjw_model.opt, name), values)
 
     def set_options(self, options: dict[str, np.ndarray]) -> None:
         """Set ``MjOption`` fields from one value per world, or a single value shared by all worlds."""

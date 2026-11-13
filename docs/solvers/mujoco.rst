@@ -925,7 +925,9 @@ models, so construction and
 per-world properties on both backends.
 :meth:`~newton.solvers.SolverMuJoCo.reset` clears the native buffers of the
 selected worlds only. ``solver.mj_model`` and ``solver.mj_data`` are the first
-world's model and data.
+world's model and data. The batch runs only C physics callbacks, so stepping
+raises while a Python function is installed as a MuJoCo callback, for example
+with ``mujoco.set_mjcb_control``.
 
 
 Runtime state synchronization

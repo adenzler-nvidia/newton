@@ -6255,14 +6255,15 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         )
         # After non-RK4 integration, MuJoCo retains the input contact geometry and forces.
         contacts_after_step = self.mj_model.opt.integrator != mujoco.mjtIntegrator.mjINT_RK4
-        if needs_body_observables or (needs_contact_observables and not contacts_after_step):
+        forward = needs_body_observables or (needs_contact_observables and not contacts_after_step)
+        if forward:
             # Export while qvel, cvel, cdof_dot, and the constraint solve agree; the step continues from here.
             cpu.forward()
             if needs_body_observables:
                 self._update_body_observables(self.model, state_out, observables)
             if needs_contact_observables and not contacts_after_step:
                 self._populate_contact_observables(observables.contacts, observables.contact_f, warning_stacklevel=5)
-        cpu.step()
+        cpu.step(after_forward=forward)
         if needs_contact_observables and contacts_after_step:
             self._populate_contact_observables(observables.contacts, observables.contact_f, warning_stacklevel=5)
 
@@ -6293,6 +6294,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             if self._cpu is not None:
                 self._cpu.pull_data(("xipos", "subtree_com", "cvel"))
                 self._cpu.pull_rne_postconstraint()
+                # The native models are writable, so use the gravity they solved with.
+                self._cpu.pull_options(("gravity",))
             wp.launch(
                 convert_rigid_forces_from_mj_kernel,
                 (nworld, nbody),
@@ -6704,7 +6707,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             dim=contacts.rigid_contact_max if preserve_geometry else max(mj_data.naconmax, 1),
             inputs=[
                 self.mjc_geom_to_newton_shape,
-                self.mjw_model.opt.cone,
+                # The native models are writable, so use the cone they solved with.
+                self.mjw_model.opt.cone if self._cpu is None else int(self.mj_model.opt.cone),
                 mj_data.nacon,
                 mj_contact.pos,
                 mj_contact.frame,

@@ -8748,6 +8748,9 @@ class TestMuJoCoOptions(unittest.TestCase):
                     model, use_mujoco_cpu=True, disable_contacts=True, disable_sensors=True, integrator=integrator
                 )
                 mujoco = solver._mujoco
+                # Exports follow options written to the native model, not the ones the solver was built with.
+                for native in (solver, reference):
+                    native.mj_model.opt.gravity[:] = (0.0, 1.0, -3.0)
                 state_in, state_out, reference_out = model.state(), model.state(), model.state()
                 control = model.control()
                 solver._apply_mjc_control(model, state_in, control)
