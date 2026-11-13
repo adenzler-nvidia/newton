@@ -1810,7 +1810,7 @@ class TestMenagerieBase(unittest.TestCase):
         state.joint_q.assign(joint_q_np)
 
         # Sync perturbed joints to Newton's mjwarp qpos
-        solver._update_mjc_data(solver.mjw_data, model, state)
+        solver._update_mjc_data(model, state)
 
         # Copy the same qpos to native so both sides start from identical joint positions
         self._native_mjw_data.qpos.assign(solver.mjw_data.qpos.numpy())
