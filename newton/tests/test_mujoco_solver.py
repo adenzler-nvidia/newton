@@ -15853,6 +15853,29 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         self.assertEqual(native[1].geom_friction[box, 0], 0.123)
         self.assertAlmostEqual(native[2].geom_friction[box, 0], 0.77, places=6)
 
+    def test_inferred_weld_poses_are_frozen(self):
+        """Clear the weld-inference flags of every native world, so constants refreshes keep the compiled poses."""
+        for device in wp.get_devices():
+            with self.subTest(device=device):
+                template = newton.ModelBuilder()
+                bodies = [template.add_link(mass=0.01) for _ in range(3)]
+                joints = [template.add_joint_revolute(-1, bodies[0])]
+                joints += [template.add_joint_revolute(parent, child) for parent, child in itertools.pairwise(bodies)]
+                template.add_articulation(joints)
+                template.add_joint_fixed(
+                    bodies[2],
+                    bodies[0],
+                    parent_xform=wp.transform((0.0, 0.0, -0.45), wp.quat_identity()),
+                    child_xform=wp.transform((0.0, 0.1, -0.3), wp.quat_identity()),
+                )
+                builder = newton.ModelBuilder()
+                builder.bound_inertia = builder.bound_mass = 0.01
+                builder.replicate(template, 2)
+                model = builder.finalize(device=device)
+                solver = SolverMuJoCo(model, use_mujoco_cpu=True, kinematic_switchable_roots=False)
+                for native in solver._cpu.models:
+                    np.testing.assert_array_equal(native.eq_data[:, 11], 0.0)
+
     def test_kinematic_root_in_one_world(self):
         """Hold a root kinematic in one world while the same root falls in the others."""
         model = self._build_model()

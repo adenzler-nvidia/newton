@@ -9550,9 +9550,11 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             self.notify_model_changed(ModelFlags.ALL)
             if self.mj_model.neq:
                 # Freeze weld poses MuJoCo inferred per world; set_const would re-infer welds marked in eq_data[11].
-                eq_data = self.mjw_model.eq_data.numpy()
+                # Take the output first: on CPU devices the NumPy values alias the array.
+                eq_data_out = self._mjw_model_outputs("eq_data")[0]
+                eq_data = eq_data_out.numpy()
                 eq_data[..., 11] = 0.0
-                self._mjw_model_outputs("eq_data")[0].assign(eq_data)
+                eq_data_out.assign(eq_data)
                 if self._cpu is not None:
                     self._cpu.flush()
                 else:
@@ -9993,9 +9995,11 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         newton_eq = self.mjc_eq_to_newton_eq.numpy()
         mapped = weld & (newton_eq >= 0)
         infer = np.all(relpose.numpy()[:, 3:] == 0.0, axis=1)[np.maximum(newton_eq, 0)]
-        eq_data = self.mjw_model.eq_data.numpy()
+        # Take the output first: on CPU devices the NumPy values alias the array.
+        eq_data_out = self._mjw_model_outputs("eq_data")[0]
+        eq_data = eq_data_out.numpy()
         eq_data[..., 11] = np.where(mapped, infer.astype(eq_data.dtype), eq_data[..., 11])
-        self._mjw_model_outputs("eq_data")[0].assign(eq_data)
+        eq_data_out.assign(eq_data)
 
     def _init_dampratio_invweight_actuators(self, actuators: np.ndarray) -> None:
         """Select actuators whose reflected inertia ``set_const_0`` already computes exactly.
