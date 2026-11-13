@@ -9554,6 +9554,10 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 else:
                     self.mj_model.eq_data[:, 11] = 0.0
             self._resolve_joint_target_damping(spec, joint_target_position_rows)
+            if self._cpu is not None:
+                # Derive every world's data from its own state and model, as the template's was.
+                self._cpu.flush()
+                self._cpu.forward()
             if not self.use_mujoco_cpu:
                 # Keep the host template coherent after construction. Runtime
                 # GPU notifications intentionally update only device arrays.

@@ -31,17 +31,29 @@ _SET_CONST_FIELDS = (
 _RESET_FIELDS = ("qacc_warmstart", "qfrc_applied", "xfrc_applied", "ctrl", "act")
 
 
-def _numpy_shape(array: wp.array) -> tuple[int, ...]:
-    return (*array.shape, *getattr(array.dtype, "_shape_", ()))
+class _HostArrays:
+    """Host access to Warp arrays, without a copy for arrays on the CPU device."""
 
+    def __init__(self):
+        # Views of CPU arrays, which wp.array.numpy() takes several microseconds to create.
+        self._views: dict[int, tuple[wp.array, np.ndarray]] = {}
 
-def _assign(dst: wp.array, values: np.ndarray) -> None:
-    """Write host values to a Warp array on any device."""
-    if dst.device.is_cpu:
-        view = dst.numpy()
-        view[...] = values.reshape(view.shape)
-    else:
-        dst.assign(values.reshape(_numpy_shape(dst)))
+    def read(self, array: wp.array) -> np.ndarray:
+        """Return the array's values, which alias the array on the CPU device."""
+        if not array.device.is_cpu:
+            return array.numpy()
+        cached = self._views.get(id(array))
+        if cached is None:
+            cached = self._views[id(array)] = (array, array.numpy())
+        return cached[1]
+
+    def write(self, array: wp.array, values: np.ndarray) -> None:
+        """Assign host values to the array."""
+        if array.device.is_cpu:
+            view = self.read(array)
+            view[...] = values.reshape(view.shape)
+        else:
+            array.assign(values.reshape(*array.shape, *getattr(array.dtype, "_shape_", ())))
 
 
 def _quat_to_mat(quat: np.ndarray) -> np.ndarray:
@@ -135,6 +147,7 @@ class MuJoCoCPUBackend:
         self._mujoco = mujoco
         self._mjw_model = mjw_model
         self._mjw_data = mjw_data
+        self._host = _HostArrays()
         # One MjData per world, which contact and constraint export reads.
         self.batch = batch.Batch(mj_model, nworld, nthread, persistent=True)
         """The simulations; state fields are bound and model fields expanded per world."""
@@ -238,9 +251,8 @@ class MuJoCoCPUBackend:
             if not native.size:
                 continue
             # Fields without a world dimension, or with a single entry, are shared by all worlds.
-            values = np.broadcast_to(
-                getattr(self._mjw_model, name).numpy().reshape(-1, *native.shape[1:]), native.shape
-            )
+            values = self._host.read(getattr(self._mjw_model, name)).reshape(-1, *native.shape[1:])
+            values = np.broadcast_to(values, native.shape)
             changed = native.astype(values.dtype) != values
             mask = self.model_field_masks.get(name)
             if mask is not None:
@@ -255,8 +267,8 @@ class MuJoCoCPUBackend:
             if native.size:
                 target = getattr(self._mjw_model, name)
                 # Fields without a world dimension keep the first world's values.
-                shared = int(np.prod(_numpy_shape(target))) == native[0].size
-                _assign(target, native[0] if shared else native)
+                shared = target.size * wp.types.type_size(target.dtype) == native[0].size
+                self._host.write(target, native[0] if shared else native)
 
     def push_data(self, names: Iterable[str], worlds: Sequence[int] | None = None) -> None:
         """Copy MuJoCo Warp data fields to the native state of the selected worlds."""
@@ -264,7 +276,7 @@ class MuJoCoCPUBackend:
         for name in names:
             native = self.batch.bind(name)
             if native.size:
-                native[rows] = getattr(self._mjw_data, name).numpy().reshape(native.shape)[rows]
+                native[rows] = self._host.read(getattr(self._mjw_data, name)).reshape(native.shape)[rows]
         self._data_changed()
 
     def pull_data(self, names: Iterable[str]) -> None:
@@ -272,7 +284,7 @@ class MuJoCoCPUBackend:
         for name in names:
             native = self.batch.bind(name)
             if native.size:
-                _assign(getattr(self._mjw_data, name), native)
+                self._host.write(getattr(self._mjw_data, name), native)
 
     def pull_rne_postconstraint(self) -> None:
         """Compute the body accelerations and interaction forces, which MuJoCo skips without sensors that use them."""
@@ -280,7 +292,7 @@ class MuJoCoCPUBackend:
         for model, data in worlds:
             self._mujoco.mj_rnePostConstraint(model, data)
         for name in ("cacc", "cfrc_int"):
-            _assign(getattr(self._mjw_data, name), np.stack([getattr(data, name) for _, data in worlds]))
+            self._host.write(getattr(self._mjw_data, name), np.stack([getattr(data, name) for _, data in worlds]))
 
     def set_options(self, options: dict[str, np.ndarray]) -> None:
         """Set ``MjOption`` fields from one value per world, or a single value shared by all worlds."""
