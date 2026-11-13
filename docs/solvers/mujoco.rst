@@ -332,8 +332,8 @@ On the MuJoCo Warp backend, runtime joint- and tendon-limit updates are
 stored in ``solver.mjw_model.jnt_solref``, ``tendon_solref_lim``, and
 ``tendon_range`` per world. The corresponding arrays in the host template
 ``solver.mj_model`` are not updated; inspect the Warp arrays for current
-values. The MuJoCo CPU backend copies them to the native model of every world,
-of which ``solver.mj_model`` is the first.
+values. The MuJoCo CPU backend copies them to every native world, of which
+``solver.mj_model`` shows the first.
 
 .. note::
 
@@ -916,18 +916,17 @@ a negative world index — assigning any of them to the global world
 raises ``ValueError``. Only shapes may live in the global world (-1);
 they are shared across all worlds without replication.
 
-The MuJoCo CPU backend (``use_mujoco_cpu=True``) gives every world its own
-native ``MjModel`` and ``MjData`` and steps them on ``nthread`` threads.
-Per-world model properties are written to the same MuJoCo Warp arrays as on
-the MuJoCo Warp backend and copied to the native models, so construction and
+The MuJoCo CPU backend (``use_mujoco_cpu=True``) runs the worlds in a
+``mujoco.batch.Batch``, which steps them on ``nthread`` threads. Per-world
+model properties are written to the same MuJoCo Warp arrays as on the MuJoCo
+Warp backend and copied to the batch, so construction and
 :meth:`~newton.solvers.SolverMuJoCo.notify_model_changed` support the same
-per-world properties on both backends. ``solver.mj_model`` and
-``solver.mj_data`` are the first world's.
+per-world properties on both backends.
 :meth:`~newton.solvers.SolverMuJoCo.reset` clears the native buffers of the
-selected worlds only. Memory grows with the world count times the size of
-the compiled model and its data. The threads hand over Python's
-global interpreter lock between worlds, so throughput levels off after a few
-threads for small models; the default ``nthread`` accounts for this.
+selected worlds only. ``solver.mj_model`` and ``solver.mj_data`` are copies of
+the first world, refreshed after every step and model update. Writing to them
+does not change the simulation: pass solver options to the constructor, and
+edit the Newton model and notify the solver to change properties.
 
 
 Runtime state synchronization
@@ -1444,7 +1443,7 @@ use the cached inverse weights. Compiled actuator length ranges are preserved,
 and pending tendon-limit edits are left unpublished.
 When sleeping is enabled, updated parameters wake all worlds. The MuJoCo Warp
 path supports CUDA graph capture; the MuJoCo CPU backend copies values to its
-native models and cannot be captured.
+native worlds and cannot be captured.
 
 Use :attr:`~newton.ModelFlags.JOINT_DOF_INERTIAL_PROPERTIES` for
 :attr:`~newton.Model.joint_armature` changes. Reference-pose changes, including
@@ -1532,8 +1531,8 @@ API and subject to change.
   ``convert_newton_contacts_to_mjwarp_kernel``, ``convert_solref``, …).
   They write the MuJoCo Warp model and data on both backends.
 - :github:`newton/_src/solvers/mujoco/cpu_backend.py` — the native MuJoCo
-  worlds of the CPU backend, which mirror the MuJoCo Warp arrays the kernels
-  write and are stepped on a thread pool.
+  worlds of the CPU backend, a ``mujoco.batch.Batch`` that mirrors the MuJoCo
+  Warp arrays the kernels write.
 - :class:`~newton.usd.SchemaResolverMjc`
   (:github:`newton/_src/usd/schemas.py`) — USD ``mjc:*`` attribute →
   Newton built-in property mapping.

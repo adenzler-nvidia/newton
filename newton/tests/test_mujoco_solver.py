@@ -2746,8 +2746,8 @@ class TestMuJoCoSolverKinematicBodyProperties(unittest.TestCase):
                 angles = rates * 99 * dt
                 np.testing.assert_allclose(state_0.joint_q.numpy()[[0, 2]], angles, atol=1.0e-5)
                 if use_mujoco_cpu:
-                    mocap_pos = np.stack([data.mocap_pos for data in solver._cpu.data])
-                    mocap_quat = np.stack([data.mocap_quat for data in solver._cpu.data])
+                    mocap_pos = solver._cpu.batch.bind("mocap_pos")
+                    mocap_quat = solver._cpu.batch.bind("mocap_quat")
                 else:
                     mocap_pos, mocap_quat = solver.mjw_data.mocap_pos.numpy(), solver.mjw_data.mocap_quat.numpy()
                 for world in range(worlds):
@@ -8596,14 +8596,9 @@ class TestMuJoCoOptions(unittest.TestCase):
         solver.step(model.state(), model.state(), model.control(), contacts, 0.01, observables=observables)
         np.testing.assert_allclose(observables.qfrc_actuator.numpy(), solver.mj_data.qfrc_actuator, atol=1e-6)
 
-        # Discrete stepping works, but its native integrator has no Python binding
-        # for inserting body exports before integration.
+        # Every native integrator exports body observables from its forward solve.
         solver = SolverMuJoCo(model, use_mujoco_cpu=True, integrator=int(solver._mujoco.mjtIntegrator.mjINT_DISCRETE))
-        self.assertEqual(solver.supported_observables, qfrc_kinds | {solver.ObservableKind.CONTACT_F})
-        for kind in (solver.ObservableKind.BODY_QDD, solver.ObservableKind.BODY_PARENT_F):
-            with self.subTest(integrator="discrete", kind=kind):
-                with self.assertRaisesRegex(ValueError, "does not support"):
-                    solver.observables({kind})
+        self.assertEqual(solver.supported_observables, observables.kinds)
         observables = solver.observables(solver.supported_observables, contacts=contacts)
         state_out = model.state()
         control = model.control()
@@ -9661,7 +9656,7 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
 
     @requires(*MUJOCO_MODULES)
     def test_ball_joint_actuator_readback_rotated_child_anchor(self):
-        """convert_qfrc_from_mj_kernel BALL maps mj_data.qfrc_actuator to state.mujoco.qfrc_actuator in Newton's anchor frame for varying joint_q under non-identity child_xform rotation."""
+        """convert_qfrc_from_mj_kernel BALL maps MuJoCo's qfrc_actuator to Newton's anchor frame for varying joint_q under non-identity child_xform rotation."""
         child_rot = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), math.pi / 6.0)
         rx90 = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), math.pi / 2.0)
         ry45 = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), math.pi / 4.0)
@@ -9682,7 +9677,7 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
         )
         builder.add_articulation([ball_j])
         model = builder.finalize()
-        solver = SolverMuJoCo(model, use_mujoco_cpu=True)
+        solver = SolverMuJoCo(model)
         observables = solver.observables(kinds={solver.ObservableKind.QFRC_ACTUATOR})
 
         q_start = int(model.joint_q_start.numpy()[ball_j])
@@ -9716,9 +9711,9 @@ class TestMuJoCoArticulationConversion(unittest.TestCase):
                 wp.copy(state.joint_q, wp.array(q_np, dtype=wp.float32))
 
                 solver._update_mjc_data(model, state)
-                qfrc_np = np.array(solver.mj_data.qfrc_actuator, dtype=np.float32).copy()
-                qfrc_np[qd_start : qd_start + 3] = [tau_mj[0], tau_mj[1], tau_mj[2]]
-                solver.mj_data.qfrc_actuator[:] = qfrc_np
+                qfrc_np = solver.mjw_data.qfrc_actuator.numpy()
+                qfrc_np[0, qd_start : qd_start + 3] = [tau_mj[0], tau_mj[1], tau_mj[2]]
+                solver.mjw_data.qfrc_actuator.assign(qfrc_np)
 
                 solver._update_newton_state(model, state, state_prev=state, observables=observables)
 
@@ -15725,9 +15720,7 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         cpu = SolverMuJoCo(model, use_mujoco_cpu=True, nthread=2)
         serial = SolverMuJoCo(model, use_mujoco_cpu=True, nthread=1)
         warp = SolverMuJoCo(model)
-        self.assertEqual(len(cpu._cpu.models), self.WORLD_COUNT)
-        self.assertIs(cpu._cpu.models[0], cpu.mj_model)
-        self.assertIs(cpu._cpu.data[0], cpu.mj_data)
+        self.assertEqual(cpu._cpu.nworld, self.WORLD_COUNT)
 
         self._randomize(model, seed=2)
         for solver in (cpu, serial, warp):
@@ -15746,9 +15739,12 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
                     self.assertFalse(np.allclose(native[0], native[1]))
                     randomized = getattr(warp.mjw_model, name).numpy().reshape(native.shape)
                     np.testing.assert_allclose(native[used], randomized[used], rtol=1.0e-5)
-        gravity = np.stack([m.opt.gravity for m in cpu._cpu.models])
+        gravity = cpu._cpu.batch.expanded("opt.gravity")
         np.testing.assert_allclose(gravity, model.gravity.numpy()[: self.WORLD_COUNT], rtol=1.0e-6)
-        np.testing.assert_array_equal([m.opt.impratio for m in cpu._cpu.models], impratio[: self.WORLD_COUNT])
+        np.testing.assert_array_equal(cpu._cpu.batch.expanded("opt.impratio"), impratio[: self.WORLD_COUNT])
+        # The solver's native model and data are the first world's.
+        np.testing.assert_array_equal(cpu.mj_model.body_mass, cpu._cpu.model_field("body_mass")[0])
+        np.testing.assert_array_equal(cpu.mj_model.opt.gravity, gravity[0])
 
         kinds = {
             cpu.ObservableKind.BODY_QDD,
@@ -15828,13 +15824,18 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         """
         model = self._build_model()
         solver = SolverMuJoCo(model, use_mujoco_cpu=True)
-        compiled = deepcopy(solver.mj_model)
+        # The refit reproduces the boxes that MuJoCo compiles for rotated shapes and inertial frames.
+        compiled = solver._mujoco.MjModel.from_xml_string(
+            '<mujoco><worldbody><body pos="0 0 1" quat="0.9 0.1 0.3 0.2"><freejoint/>'
+            '<geom type="box" size=".1 .2 .3" pos=".3 0 0" quat="0.7 0.1 0.6 0.2"/>'
+            '<geom type="capsule" size=".05 .2" pos="0 .4 .1" quat="0.5 0.5 0.5 0.5"/>'
+            '<geom type="sphere" size=".15" pos="-.3 .1 0"/></body></worldbody></mujoco>'
+        )
         tree = _BodyBVH(compiled)
         self.assertGreater(tree.nodes.size, 2)
-        expected = compiled.bvh_aabb.copy()
-        compiled.bvh_aabb[tree.nodes] = 0.0
-        tree.refit([compiled])
-        np.testing.assert_allclose(compiled.bvh_aabb, expected, atol=1.0e-12)
+        fields = ("geom_pos", "geom_quat", "geom_aabb", "body_ipos", "body_iquat")
+        boxes = tree.boxes(*(getattr(compiled, name)[None] for name in fields))
+        np.testing.assert_allclose(boxes[0], compiled.bvh_aabb[tree.nodes], atol=1.0e-12)
 
         # Lower world 0's box and world 1's sphere below their base, and move world 0's site.
         shapes_per_world = (model.shape_count - 1) // self.WORLD_COUNT
@@ -15865,15 +15866,14 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
             candidate.step(state_0, state_1, None, None, 0.002)
         lowered = {0: int(np.flatnonzero(geoms[0] == box)[0]), 1: int(np.flatnonzero(geoms[1] == sphere)[0])}
         for world in range(self.WORLD_COUNT):
-            data, fresh_data = solver._cpu.data[world], fresh._cpu.data[world]
+            data, fresh_data = solver._cpu.worlds()[world][1], fresh._cpu.worlds()[world][1]
             pairs = [sorted(map(tuple, d.contact.geom[: d.ncon].tolist())) for d in (data, fresh_data)]
             self.assertEqual(pairs[0], pairs[1])
             # Only the lowered shape of a world reaches the ground.
             touching = {geom for pair in pairs[0] for geom in pair if geom != 0}
             self.assertEqual(touching, {lowered[world]} if world in lowered else set())
             np.testing.assert_allclose(data.site_xpos, fresh_data.site_xpos, atol=1.0e-6)
-        site_y = [data.site_xpos[0, 1] for data in solver._cpu.data]
-        np.testing.assert_allclose(site_y, (0.3, 0.0, 0.0), atol=1.0e-6)
+        np.testing.assert_allclose(solver._cpu.batch.bind("site_xpos")[:, 0, 1], (0.3, 0.0, 0.0), atol=1.0e-6)
 
     def test_thread_count_validation(self):
         """Reject thread counts that are not positive integers or target MuJoCo Warp."""

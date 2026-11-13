@@ -61,7 +61,7 @@ from .constants import (
     SOLREF_MODE_MJCF_DEFAULT,
     SOLREF_MODE_RAW,
 )
-from .cpu_backend import MuJoCoCPUBackend, default_thread_count
+from .cpu_backend import MuJoCoCPUBackend
 from .enums import EqType as _EqType
 from .enums import _ActuatorBiasType, _ActuatorDynamicsType, _ActuatorGainType
 from .equality import (
@@ -748,20 +748,6 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         kinds = super().supported_observables
         if self.use_mujoco_cpu:
             kinds = kinds.difference({self.ObservableKind.OVERFLOW})
-            if self.mj_model.opt.integrator not in (
-                self._mujoco.mjtIntegrator.mjINT_EULER,
-                self._mujoco.mjtIntegrator.mjINT_RK4,
-                self._mujoco.mjtIntegrator.mjINT_IMPLICIT,
-                self._mujoco.mjtIntegrator.mjINT_IMPLICITFAST,
-            ):
-                # Body exports need mj_rnePostConstraint before qvel advances,
-                # followed by an integrator callable from Python.
-                return kinds.difference(
-                    {
-                        SolverBase.ObservableKind.BODY_QDD,
-                        SolverBase.ObservableKind.BODY_PARENT_F,
-                    }
-                )
         return kinds
 
     def observables(
@@ -4533,12 +4519,12 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             viscosity: Medium viscosity for lift and drag forces. If None, uses model custom attribute or MuJoCo's default (0.0).
             wind: Wind velocity vector (x, y, z) for lift and drag forces. If None, uses model custom attribute or MuJoCo's default (0, 0, 0).
             magnetic: Global magnetic flux vector (x, y, z). If None, uses model custom attribute or MuJoCo's default (0, -0.5, 0).
-            use_mujoco_cpu: If True, use MuJoCo's C implementation instead of `mujoco_warp`. Each world gets its
-                own native ``MjModel`` and ``MjData``, so per-world model properties are supported as with
-                `mujoco_warp`, and memory grows with the world count.
+            use_mujoco_cpu: If True, use MuJoCo's C implementation instead of `mujoco_warp`. The worlds run in a
+                ``mujoco.batch.Batch`` with per-world model properties, as with `mujoco_warp`. ``mj_model`` and
+                ``mj_data`` are then copies of the first world that are refreshed after every change; writes to them
+                do not reach the simulation.
             nthread: Number of threads that step the worlds with ``use_mujoco_cpu=True``, at most one per world.
-                If None, chosen from the available CPUs and the size of a world, since small worlds gain little
-                from more than a few threads.
+                If None, MuJoCo uses every CPU.
             enable_multiccd: If True, enable multi-CCD contact generation (up to 4 contact points per geom pair instead of 1). If False, disable it. If None, use the model custom attribute or disable it by default. Note: geom pairs where either geom has ``margin > 0`` always produce a single contact regardless of this flag. With the MuJoCo Warp backend and ``use_mujoco_contacts=True``, all geom and pair margins are zeroed when the model has box geoms and NATIVECCD (the default) or multi-CCD is enabled, or has mesh geoms and multi-CCD is enabled; see *Margin zeroing* in the MuJoCo solver docs. The CPU backend keeps them.
             enable_sleeping: Whether to enable MuJoCo Warp's sleeping optimization. If None, uses the model custom attribute or defaults to False. Sleeping requires the GPU backend, the Newton solver, MuJoCo contact handling, island detection, and a non-RK4 integrator.
             nvmax: Maximum number of active degrees of freedom per world when sleeping is enabled. Must accommodate every initially awake degree of freedom. If None, allocates space for every degree of freedom, which is safe but provides no compact-solver memory savings.
@@ -6270,32 +6256,18 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         needs_contact_observables = observables is not None and observables.is_requested(
             SolverBase.ObservableKind.CONTACT_F
         )
-        integrator = self.mj_model.opt.integrator
-        if not needs_body_observables and not (
-            needs_contact_observables and integrator == mujoco.mjtIntegrator.mjINT_RK4
-        ):
-            cpu.step()
-            if needs_contact_observables:
-                # After non-RK4 integration, MuJoCo retains the input contact geometry and forces.
+        # After non-RK4 integration, MuJoCo retains the input contact geometry and forces.
+        contacts_after_step = self.mj_model.opt.integrator != mujoco.mjtIntegrator.mjINT_RK4
+        if needs_body_observables or (needs_contact_observables and not contacts_after_step):
+            # Export while qvel, cvel, cdof_dot, and the constraint solve agree; the step continues from here.
+            cpu.forward()
+            if needs_body_observables:
+                self._update_body_observables(self.model, state_out, observables)
+            if needs_contact_observables and not contacts_after_step:
                 self._populate_contact_observables(observables.contacts, observables.contact_f, warning_stacklevel=5)
-            return
-
-        if integrator not in (
-            mujoco.mjtIntegrator.mjINT_EULER,
-            mujoco.mjtIntegrator.mjINT_RK4,
-            mujoco.mjtIntegrator.mjINT_IMPLICIT,
-            mujoco.mjtIntegrator.mjINT_IMPLICITFAST,
-        ):
-            raise ValueError("MuJoCo CPU body observables require Euler, RK4, implicit, or implicitfast integration.")
-
-        # Follow mj_step's checked forward/integrate pipeline, inserting the
-        # export while qvel, cvel, cdof_dot, and the constraint solve agree.
-        cpu.forward(rne_postconstraint=needs_body_observables)
-        if needs_body_observables:
-            self._update_body_observables(self.model, state_out, observables)
-        if needs_contact_observables:
+        cpu.step()
+        if needs_contact_observables and contacts_after_step:
             self._populate_contact_observables(observables.contacts, observables.contact_f, warning_stacklevel=5)
-        cpu.integrate()
 
     def _update_body_observables(
         self,
@@ -6322,7 +6294,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             # Launch over MuJoCo bodies
             nbody = self.mjc_body_to_newton.shape[1]
             if self._cpu is not None:
-                self._cpu.pull_data(("xipos", "subtree_com", "cacc", "cvel", "cfrc_int"))
+                self._cpu.pull_data(("xipos", "subtree_com", "cvel"))
+                self._cpu.pull_rne_postconstraint()
             wp.launch(
                 convert_rigid_forces_from_mj_kernel,
                 (nworld, nbody),
@@ -9533,9 +9506,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 )
             self.nvmax = self.mjw_data.nvmax
             if self.use_mujoco_cpu:
-                nthread = self._nthread or default_thread_count(nworld, self.mj_model.nv)
                 self._cpu = MuJoCoCPUBackend(
-                    mujoco, self.mj_model, self.mj_data, self.mjw_model, self.mjw_data, nworld, nthread
+                    mujoco, self.mj_model, self.mj_data, self.mjw_model, self.mjw_data, nworld, self._nthread or 0
                 )
                 # The native worlds start as copies of the template; give each its own initial state.
                 self._update_mjc_data(model, state)
