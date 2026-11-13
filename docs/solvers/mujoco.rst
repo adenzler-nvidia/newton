@@ -925,7 +925,9 @@ models, so construction and
 per-world properties on both backends.
 :meth:`~newton.solvers.SolverMuJoCo.reset` clears the native buffers of the
 selected worlds only. ``solver.mj_model`` and ``solver.mj_data`` are the first
-world's model and data. The batch runs only C physics callbacks, so stepping
+world's model and data. Options that MuJoCo Warp shares between worlds, such as
+the cone, the integrator, and the iteration counts, follow ``solver.mj_model.opt``
+in every world. The batch runs only C physics callbacks, so stepping
 raises while a Python function is installed as a MuJoCo callback, for example
 with ``mujoco.set_mjcb_control``.
 

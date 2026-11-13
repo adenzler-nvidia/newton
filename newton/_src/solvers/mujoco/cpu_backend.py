@@ -27,6 +27,24 @@ _SET_CONST_FIELDS = (
     "eq_data",
 )
 
+# MjOption fields that MuJoCo Warp shares between worlds; every native world takes the first world's.
+_SHARED_OPTIONS = (
+    "integrator",
+    "cone",
+    "jacobian",
+    "solver",
+    "iterations",
+    "ls_iterations",
+    "noslip_iterations",
+    "noslip_tolerance",
+    "ccd_iterations",
+    "sdf_initpoints",
+    "sdf_iterations",
+    "disableflags",
+    "enableflags",
+    "disableactuator",
+)
+
 # MjData buffers that persist between steps and must not outlive a reset.
 _RESET_FIELDS = ("qacc_warmstart", "qfrc_applied", "xfrc_applied", "ctrl", "act")
 
@@ -67,6 +85,7 @@ class MuJoCoCPUBackend:
     The batch owns every world's state and steps it on that world's model, so writes to
     the models take effect. The solver's ``mj_data`` is a copy of the first world's data
     whose state is read back before every step, so writes to it take effect as well.
+    Options that MuJoCo Warp shares between worlds follow the first world's model.
     """
 
     def __init__(
@@ -95,6 +114,7 @@ class MuJoCoCPUBackend:
         self._const_stale = np.zeros(nworld, dtype=bool)
         self._const_inputs = frozenset(getattr(mujoco.MjModel, "_setconst_inputs", ()))
         self._timestep: float | None = None
+        self._shared_options = self._read_shared_options()
         # Newton only defines the size components that a geom's collision shape uses. MuJoCo compiles
         # the others for rendering, such as a plane's extent and grid spacing, or from mesh bounds.
         geom = mujoco.mjtGeom
@@ -102,12 +122,11 @@ class MuJoCoCPUBackend:
         size_count |= {geom.mjGEOM_ELLIPSOID: 3, geom.mjGEOM_BOX: 3}
         used = np.array([size_count.get(geom(int(t)), 0) for t in mj_model.geom_type], dtype=int)
         self.model_field_masks = {"geom_size": np.arange(3) < used[:, None]}
-        """Entries of a model field that :meth:`push_model` copies, for fields it copies only in part."""
+        """Entries of a model field that :meth:`flush` copies, for fields it copies only in part."""
 
-        self.dirty_model_fields: set[str] = set()
-        """MuJoCo Warp model fields written since the last :meth:`flush`."""
-        self.dirty_data_fields: set[str] = set()
-        """MuJoCo Warp data fields written since the last :meth:`flush`."""
+        # MuJoCo Warp fields written since the last flush; model fields map to their values before the write.
+        self._model_before: dict[str, np.ndarray] = {}
+        self._dirty_data: set[str] = set()
 
     @property
     def nworld(self) -> int:
@@ -146,9 +165,20 @@ class MuJoCoCPUBackend:
         self.batch.get_data(0, self._data[0])
 
     def _begin(self) -> None:
+        shared = self._read_shared_options()
+        if shared != self._shared_options:
+            self._shared_options = shared
+            self._const_stale[:] = True
+            for option in self._options[1:]:
+                for name, value in zip(_SHARED_OPTIONS, shared, strict=True):
+                    setattr(option, name, value)
         # The batch requires its models to be set again after they were edited, which restarts its solve.
         self.batch.set_models(self.models)
         self._read_first_state()
+
+    def _read_shared_options(self) -> tuple:
+        option = self._options[0]
+        return tuple(getattr(option, name) for name in _SHARED_OPTIONS)
 
     def _read_first_state(self) -> None:
         """Take the first world's state from the solver's ``mj_data``, which callers may have written."""
@@ -195,28 +225,41 @@ class MuJoCoCPUBackend:
             views = self._model_views[name] = [getattr(model, name) for model in self.models]
         return views
 
-    def push_model(self, names: Iterable[str]) -> None:
-        """Copy the entries of MuJoCo Warp model fields that differ from the native models.
-
-        Native entries that already round to the MuJoCo Warp value are left alone, so
-        constants that MuJoCo computed in double precision survive unrelated updates.
-        """
+    def mark_model(self, names: Iterable[str]) -> None:
+        """Note MuJoCo Warp model fields that are about to be written."""
         for name in names:
-            views = self._views(name)
-            if not views[0].size:
-                continue
-            # Fields without a world dimension, or with a single entry, are shared by all worlds.
-            values = self._host.read(getattr(self._mjw_model, name)).reshape(-1, *views[0].shape)
-            changed = np.stack(views).astype(values.dtype) != values
-            mask = self.model_field_masks.get(name)
-            if mask is not None:
-                changed &= mask
-            shared = values.shape[0] == 1
-            worlds = changed.reshape(self.nworld, -1).any(axis=1)
-            if name in self._const_inputs or not self._const_inputs:
-                self._const_stale |= worlds
-            for world in np.flatnonzero(worlds):
-                np.copyto(views[world], values[0 if shared else world], where=changed[world])
+            if name not in self._model_before:
+                self._model_before[name] = self._host.read(getattr(self._mjw_model, name)).copy()
+
+    def mark_data(self, names: Iterable[str]) -> None:
+        """Note MuJoCo Warp data fields that are about to be written."""
+        self._dirty_data.update(names)
+
+    def _push_model(self, name: str, before: np.ndarray) -> None:
+        """Copy the entries of a MuJoCo Warp model field that were changed to the native models.
+
+        Other native entries are left alone, so constants that MuJoCo computed in double
+        precision and entries that the caller wrote survive unrelated updates.
+        """
+        views = self._views(name)
+        if not views[0].size:
+            return
+        # Fields without a world dimension, or with a single entry, are shared by all worlds.
+        values = self._host.read(getattr(self._mjw_model, name)).reshape(-1, *views[0].shape)
+        changed = values != before.reshape(values.shape)
+        mask = self.model_field_masks.get(name)
+        if mask is not None:
+            changed &= mask
+        worlds = np.flatnonzero(changed.reshape(changed.shape[0], -1).any(axis=1))
+        if not worlds.size:
+            return
+        if values.shape[0] == 1:
+            worlds = range(self.nworld)
+        if name in self._const_inputs or not self._const_inputs:
+            self._const_stale[worlds] = True
+        for world in worlds:
+            row = world % values.shape[0]
+            np.copyto(views[world], values[row], where=changed[row])
 
     def pull_model(self, names: Iterable[str]) -> None:
         """Copy native model fields of every world to the MuJoCo Warp model."""
@@ -275,12 +318,13 @@ class MuJoCoCPUBackend:
 
     def flush(self) -> None:
         """Copy the MuJoCo Warp fields written since the last call to the native worlds."""
-        if self.dirty_model_fields:
-            self.push_model(self.dirty_model_fields)
-            self.dirty_model_fields.clear()
-        if self.dirty_data_fields:
-            self.push_data(self.dirty_data_fields)
-            self.dirty_data_fields.clear()
+        if self._model_before:
+            for name, before in self._model_before.items():
+                self._push_model(name, before)
+            self._model_before.clear()
+        if self._dirty_data:
+            self.push_data(self._dirty_data)
+            self._dirty_data.clear()
 
     def model_field(self, name: str) -> np.ndarray:
         """Return a native model field of every world, shape ``[nworld, ...]``."""
@@ -361,6 +405,7 @@ class MuJoCoCPUBackend:
         dist = np.empty(count, dtype=np.float32)
         dim = np.empty(count, dtype=np.int32)
         geom = np.empty((count, 2), dtype=np.int32)
+        adhesion = np.empty(count, dtype=np.float32)
         efc_address = np.empty(count, dtype=np.int32)
         worldid = np.empty(count, dtype=np.int32)
         efc_force = np.zeros((self.nworld, max(nefc, 1)), dtype=np.float32)
@@ -377,6 +422,7 @@ class MuJoCoCPUBackend:
             dist[rows] = contact.dist[:n]
             dim[rows] = contact.dim[:n]
             geom[rows] = contact.geom[:n]
+            adhesion[rows] = contact.adhesion[:n]
             efc_address[rows] = contact.efc_address[:n]
             worldid[rows] = world
             start += n
@@ -396,7 +442,7 @@ class MuJoCoCPUBackend:
                 geom=wp.array(geom, dtype=wp.vec2i, device=device),
                 efc_address=wp.array(efc_rows.astype(np.int32), dtype=int, device=device),
                 worldid=wp.array(worldid, dtype=wp.int32, device=device),
-                adhesion=wp.zeros(count, dtype=float, device=device),
+                adhesion=wp.array(adhesion, dtype=float, device=device),
             ),
             efc=SimpleNamespace(force=wp.array(efc_force, dtype=float, device=device)),
         )

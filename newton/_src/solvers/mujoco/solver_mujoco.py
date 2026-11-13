@@ -6002,13 +6002,13 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
     def _mjw_model_outputs(self, *names: str) -> list[wp.array]:
         """Return MuJoCo Warp model arrays that are about to be written."""
         if self._cpu is not None:
-            self._cpu.dirty_model_fields.update(names)
+            self._cpu.mark_model(names)
         return [getattr(self.mjw_model, name) for name in names]
 
     def _mjw_data_outputs(self, *names: str) -> list[wp.array]:
         """Return MuJoCo Warp data arrays that are about to be written."""
         if self._cpu is not None:
-            self._cpu.dirty_data_fields.update(names)
+            self._cpu.mark_data(names)
         return [getattr(self.mjw_data, name) for name in names]
 
     def _apply_mjc_control(self, model: Model, state: State, control: Control | None):
@@ -6707,7 +6707,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             dim=contacts.rigid_contact_max if preserve_geometry else max(mj_data.naconmax, 1),
             inputs=[
                 self.mjc_geom_to_newton_shape,
-                # The native models are writable, so use the cone they solved with.
+                # The native models are writable and share the first one's cone.
                 self.mjw_model.opt.cone if self._cpu is None else int(self.mj_model.opt.cone),
                 mj_data.nacon,
                 mj_contact.pos,

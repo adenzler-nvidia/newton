@@ -15804,6 +15804,55 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         self.assertGreater(np.ptp(weight), 1.0)
         np.testing.assert_allclose(support, weight, rtol=2.0e-2)
 
+    def test_contact_forces_match_native_worlds(self):
+        """Export the contact forces MuJoCo reports for each world after native option and model edits."""
+        model = self._build_model()
+        self._randomize(model, seed=5)
+        solver = SolverMuJoCo(model, use_mujoco_cpu=True)
+        mujoco = solver._mujoco
+        # Every world follows the first world's cone; adhesion is part of the reported force.
+        solver.mj_model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+        for native, _ in solver._cpu.worlds():
+            native.geom_adhesion[:] = 3.0
+            mujoco.mj_setConst(native, mujoco.MjData(native))
+        contacts = newton.Contacts(solver.get_max_contact_count(), 0, device=model.device)
+        observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
+        self._simulate(solver, 100)
+        state = model.state()
+        solver.step(state, model.state(), None, contacts, 0.002, observables=observables)
+
+        expected = []
+        for native, data in solver._cpu.worlds():
+            self.assertEqual(native.opt.cone, mujoco.mjtCone.mjCONE_ELLIPTIC)
+            self.assertGreater(data.ncon, 0)
+            self.assertTrue(np.all(data.contact.adhesion > 0.0))
+            for contact in range(data.ncon):
+                wrench = np.zeros(6)
+                mujoco.mj_contactForce(native, data, contact, wrench)
+                frame = data.contact.frame[contact].reshape(3, 3)
+                # Newton stores the wrench on the first shape in world coordinates.
+                expected.append(-np.concatenate((frame.T @ wrench[:3], frame.T @ wrench[3:])))
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        self.assertEqual(count, len(expected))
+        expected = np.array(expected)
+        self.assertGreater(np.abs(expected[:, 2]).min(), 0.1)
+        np.testing.assert_allclose(observables.contact_f.numpy()[:count], expected, rtol=1.0e-4, atol=1.0e-4)
+
+    def test_native_model_edits_survive_unrelated_updates(self):
+        """Copy only the entries Newton changed, keeping what the caller wrote to the native models."""
+        model = self._build_model()
+        solver = SolverMuJoCo(model, use_mujoco_cpu=True)
+        native = [native for native, _ in solver._cpu.worlds()]
+        box = np.flatnonzero(native[0].geom_type == solver._mujoco.mjtGeom.mjGEOM_BOX)[0]
+        native[1].geom_friction[box, 0] = 0.123
+        shape = int(solver.mjc_geom_to_newton_shape.numpy()[2, box])
+        mu = model.shape_material_mu.numpy()
+        mu[shape] = 0.77
+        model.shape_material_mu.assign(mu)
+        solver.notify_model_changed(newton.ModelFlags.SHAPE_PROPERTIES)
+        self.assertEqual(native[1].geom_friction[box, 0], 0.123)
+        self.assertAlmostEqual(native[2].geom_friction[box, 0], 0.77, places=6)
+
     def test_kinematic_root_in_one_world(self):
         """Hold a root kinematic in one world while the same root falls in the others."""
         model = self._build_model()
