@@ -934,9 +934,9 @@ every world, except for the timestep, which each step sets.
 ``solver.mj_data`` is the first world's data. Each step sets its coordinates,
 velocities, mocap poses, controls, and applied forces from Newton's
 :class:`~newton.State` and :class:`~newton.Control`; other state written to
-it, such as ``time`` and ``act``, takes effect at the next step. The batch runs only C physics callbacks, so stepping
-raises while a Python function is installed as a MuJoCo callback, for example
-with ``mujoco.set_mjcb_control``.
+it, such as ``time`` and ``act``, takes effect at the next step. The batch runs
+only C physics callbacks, so stepping raises while a Python function is
+installed as a MuJoCo callback, for example with ``mujoco.set_mjcb_control``.
 
 
 Runtime state synchronization
