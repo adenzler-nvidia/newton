@@ -15857,6 +15857,34 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
                 solver = SolverMuJoCo(model, use_mujoco_cpu=True, kinematic_switchable_roots=False)
                 np.testing.assert_array_equal(solver._cpu.model_field("eq_data")[..., 11], 0.0)
 
+    def test_step_replays_from_cpu_graph(self):
+        """Replay captured steps, including the native MuJoCo call, with the result of stepping directly."""
+        final = []
+        for capture_steps in (False, True):
+            with wp.ScopedDevice("cpu"):
+                model = self._build_model()
+            self._randomize(model, seed=7)
+            solver = SolverMuJoCo(model, use_mujoco_cpu=True)
+            state_0, state_1, control = model.state(), model.state(), model.control()
+            target = control.joint_target_q.numpy().reshape(model.world_count, -1)
+            target[:, -1] = 0.6
+            control.joint_target_q.assign(target.reshape(-1))
+            if capture_steps:
+                with wp.ScopedCapture(device="cpu") as capture:
+                    solver.step(state_0, state_1, control, None, 0.002)
+                    solver.step(state_1, state_0, control, None, 0.002)
+                # Capturing records the steps without running them.
+                for _ in range(50):
+                    wp.capture_launch(capture.graph)
+            else:
+                for _ in range(50):
+                    solver.step(state_0, state_1, control, None, 0.002)
+                    solver.step(state_1, state_0, control, None, 0.002)
+            final.append(state_0.joint_q.numpy())
+            self.assertAlmostEqual(solver.mj_data.time, 0.2, places=9)
+        self.assertGreater(np.ptp(final[0].reshape(model.world_count, -1)[:, -1]), 1.0e-3)
+        np.testing.assert_array_equal(final[1], final[0])
+
     def test_kinematic_root_in_one_world(self):
         """Hold a root kinematic in one world while the same root falls in the others."""
         model = self._build_model()

@@ -5938,6 +5938,18 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
     # The conversion kernels write the MuJoCo Warp model and data on both backends. The
     # CPU backend copies the fields named here to its native worlds on the next flush.
 
+    @property
+    def mj_data(self) -> MjData:
+        """MuJoCo data of the first world, which the CPU backend updates when it is read."""
+        cpu = getattr(self, "_cpu", None)
+        if cpu is not None:
+            cpu.show_data()
+        return self._mj_data
+
+    @mj_data.setter
+    def mj_data(self, value: MjData) -> None:
+        self._mj_data = value
+
     def _mjw_model_outputs(self, *names: str) -> list[wp.array]:
         """Return MuJoCo Warp model arrays that are about to be written."""
         if self._cpu is not None:
