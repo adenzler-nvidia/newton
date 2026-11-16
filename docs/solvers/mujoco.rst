@@ -925,11 +925,12 @@ per-world properties on both backends.
 :meth:`~newton.solvers.SolverMuJoCo.reset` clears the native buffers of the
 selected worlds only.
 
-A single world runs on ``solver.mj_model`` itself. With several worlds, the
-batch holds the model fields per world, and ``solver.mj_model`` shows the first
-world: writes to its arrays have no effect, while the options that MuJoCo Warp
-shares between worlds, such as the cone, the integrator, and the iteration
-counts, are read from ``solver.mj_model.opt`` and apply to every world.
+The batch holds the model fields of every world, and ``solver.mj_model`` shows
+the first world. Writes to its arrays have no effect on the simulation; change
+the corresponding :class:`~newton.Model` properties and call
+:meth:`~newton.solvers.SolverMuJoCo.notify_model_changed` instead. Options
+written to ``solver.mj_model.opt`` are read back before every step and apply to
+every world, except for the timestep, which each step sets.
 ``solver.mj_data`` is the first world's data. Each step sets its coordinates,
 velocities, mocap poses, controls, and applied forces from Newton's
 :class:`~newton.State` and :class:`~newton.Control`; other state written to

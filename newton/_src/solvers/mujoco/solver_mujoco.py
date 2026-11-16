@@ -4521,8 +4521,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             magnetic: Global magnetic flux vector (x, y, z). If None, uses model custom attribute or MuJoCo's default (0, -0.5, 0).
             use_mujoco_cpu: If True, use MuJoCo's C implementation instead of `mujoco_warp`. A
                 ``mujoco.batch.Batch`` runs the worlds with per-world model properties, as with `mujoco_warp`.
-                ``mj_model`` and ``mj_data`` show the first world; with several worlds, only the solver options
-                of ``mj_model`` can be written. Of ``mj_data``, state that Newton does not set from its
+                ``mj_model`` and ``mj_data`` show the first world. Of ``mj_model``, only the options can be
+                written, which then apply to every world. Of ``mj_data``, state that Newton does not set from its
                 :class:`~newton.State` and :class:`~newton.Control`, such as ``time`` and ``act``, can be written.
             nthread: Number of threads that step the worlds with ``use_mujoco_cpu=True``, at most one per world.
                 If None, MuJoCo uses every CPU.

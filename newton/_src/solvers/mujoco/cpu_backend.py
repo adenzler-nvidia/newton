@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import operator
 from collections.abc import Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any
@@ -25,24 +26,6 @@ _SET_CONST_FIELDS = (
     "tendon_length0",
     "actuator_acc0",
     "eq_data",
-)
-
-# MjOption fields that MuJoCo Warp shares between worlds; every native world takes the first world's.
-_SHARED_OPTIONS = (
-    "integrator",
-    "cone",
-    "jacobian",
-    "solver",
-    "iterations",
-    "ls_iterations",
-    "noslip_iterations",
-    "noslip_tolerance",
-    "ccd_iterations",
-    "sdf_initpoints",
-    "sdf_iterations",
-    "disableflags",
-    "enableflags",
-    "disableactuator",
 )
 
 # MjData buffers that persist between steps and must not outlive a reset.
@@ -82,12 +65,11 @@ class MuJoCoCPUBackend:
     functions on them, and copies the results back, so that only the simulation itself
     differs between the backends.
 
-    The batch holds every model field that differs between worlds as one ``[nworld, ...]``
-    array and every world's state as a row of its state array. The solver's ``mj_model``
-    and ``mj_data`` then show the first world: ``mj_data``'s state is read back before
-    every step, where Newton does not set it from its own state and control, as are the
-    options of ``mj_model`` that MuJoCo Warp shares between worlds.
-    A single world runs on the solver's ``mj_model`` itself, so writes to it take effect.
+    The batch holds every model field that Newton sets as one ``[nworld, ...]`` array and
+    every world's state as a row of its state array. The solver's ``mj_model`` and
+    ``mj_data`` show the first world. Before every step, the options of ``mj_model`` are
+    read back and given to every world, as is the state of ``mj_data`` that Newton does
+    not set from its own state and control; other writes to them have no effect.
     """
 
     def __init__(
@@ -103,11 +85,7 @@ class MuJoCoCPUBackend:
         # Persistent: one MjData per world, which contact and constraint export reads, and which fields
         # show as soon as they are bound; otherwise a field bound after a call is zero until the next one.
         self.batch = batch.Batch(mj_model, nworld, nthread, persistent=True)
-        """The simulations; state fields are bound per world, as are model fields unless there is one world."""
-        # A single world needs no per-world fields, so the batch runs on the solver's model.
-        self._live = nworld == 1
-        if self._live:
-            self.batch.set_models(mj_model)
+        """The simulations; state fields are bound and model fields expanded per world."""
         # Copies of each world's model and data for MuJoCo functions the batch does not run; the first are the solver's.
         self._models = [mj_model]
         self._data = [mj_data]
@@ -120,7 +98,10 @@ class MuJoCoCPUBackend:
         self._const_stale = np.zeros(nworld, dtype=bool)
         self._const_inputs = frozenset(getattr(mujoco.MjModel, "_setconst_inputs", ()))
         self._timestep: float | None = None
-        self._shared_options = self._read_shared_options()
+        # Options that callers may write to the solver's model; the timestep is set by every step.
+        self._option_names = sorted(f[4:] for f in batch.MODEL_FIELDS if f.startswith("opt.") and f != "opt.timestep")
+        self._get_options = operator.attrgetter(*self._option_names)
+        self._options = self._read_options()
         # Newton only defines the size components that a geom's collision shape uses. MuJoCo compiles
         # the others for rendering, such as a plane's extent and grid spacing, or from mesh bounds.
         geom = mujoco.mjtGeom
@@ -147,10 +128,7 @@ class MuJoCoCPUBackend:
     # ------------------------------------------------------------------
 
     def set_timestep(self, dt: float) -> None:
-        if self._live:
-            # The solver's model is the world's, which callers may have written.
-            self._model.opt.timestep = dt
-        elif dt != self._timestep:
+        if dt != self._timestep:
             self.option("timestep")[:] = dt
             self._timestep = dt
             self.model_changed()
@@ -173,25 +151,21 @@ class MuJoCoCPUBackend:
         self.batch.get_data(0, self._data[0])
 
     def _begin(self) -> None:
-        if self._live:
-            # The batch requires its model to be set again after it was edited, which restarts its solve.
-            self.batch.set_models(self._model)
-        else:
-            self._sync_shared_options()
+        self._sync_options()
         self._read_first_state()
 
-    def _read_shared_options(self) -> tuple:
-        option = self._model.opt
-        return tuple(getattr(option, name) for name in _SHARED_OPTIONS)
+    def _read_options(self) -> tuple:
+        values = self._get_options(self._model.opt)
+        return tuple(value.tobytes() if isinstance(value, np.ndarray) else value for value in values)
 
-    def _sync_shared_options(self) -> None:
+    def _sync_options(self) -> None:
         """Give every world the options that callers wrote to the solver's ``mj_model``."""
-        shared = self._read_shared_options()
-        if shared != self._shared_options:
-            for name, value, previous in zip(_SHARED_OPTIONS, shared, self._shared_options, strict=True):
+        options = self._read_options()
+        if options != self._options:
+            for name, value, previous in zip(self._option_names, options, self._options, strict=True):
                 if value != previous:
-                    self.option(name)[:] = value
-            self._shared_options = shared
+                    self.option(name)[:] = getattr(self._model.opt, name)
+            self._options = options
             self._const_stale[:] = True
             self._models_stale = True
 
@@ -208,13 +182,10 @@ class MuJoCoCPUBackend:
     def set_const(self) -> None:
         """Recompute the model constants of the worlds whose model changed and read the ones Newton's kernels use."""
         self.flush()
-        if self._live:
-            # Callers may have written the solver's model, so its constants are always recomputed.
-            self._mujoco.mj_setConst(self._model, self._scratch_data())
-        elif self._const_stale.any():
+        if self._const_stale.any():
             self.batch.set_const(np.flatnonzero(self._const_stale))
+            self._const_stale[:] = False
             self.model_changed()
-        self._const_stale[:] = False
         self.pull_model(_SET_CONST_FIELDS)
 
     def _scratch_data(self) -> Any:
@@ -245,12 +216,11 @@ class MuJoCoCPUBackend:
 
     def model_changed(self) -> None:
         """Show the first world's model in the solver's ``mj_model`` after writes to the native fields."""
-        if not self._live:
-            # Options that callers wrote to the solver's model must reach the batch before they are overwritten.
-            self._sync_shared_options()
-            self.batch.get_model(0, self._model)
-            self._shared_options = self._read_shared_options()
-            self._models_stale = True
+        # Options that callers wrote to the solver's model must reach the batch before they are overwritten.
+        self._sync_options()
+        self.batch.get_model(0, self._model)
+        self._options = self._read_options()
+        self._models_stale = True
 
     # ------------------------------------------------------------------
     # Mirroring
@@ -260,16 +230,11 @@ class MuJoCoCPUBackend:
         """Return the native values of a model field of every world, shape ``[nworld, ...]``, which can be written."""
         field = self._fields.get(name)
         if field is None:
-            field = self._fields[name] = getattr(self._model, name)[None] if self._live else self.batch.expand(name)
+            field = self._fields[name] = self.batch.expand(name)
         return field
 
     def option(self, name: str) -> np.ndarray:
-        """Return the native values of an ``MjOption`` field of every world, shape ``[nworld, ...]``.
-
-        The result can be written, unless there is a single world and the option is a scalar.
-        """
-        if self._live:
-            return np.asarray(getattr(self._model.opt, name))[None]
+        """Return the native values of an ``MjOption`` field of every world, shape ``[nworld, ...]``."""
         return self.model_field(f"opt.{name}")
 
     def mark_model(self, names: Iterable[str]) -> None:
@@ -356,10 +321,7 @@ class MuJoCoCPUBackend:
             if not changed.any():
                 continue
             self._const_stale |= changed.reshape(self.nworld, -1).any(axis=1)
-            if current.ndim == 1 and self._live:
-                setattr(self._model.opt, name, float(values[0]))
-            else:
-                np.copyto(current, values, where=changed)
+            np.copyto(current, values, where=changed)
         self.model_changed()
 
     def flush(self) -> None:

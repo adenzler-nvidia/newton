@@ -15813,17 +15813,14 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
                 self._randomize(model, seed=5)
                 solver = SolverMuJoCo(model, use_mujoco_cpu=True)
                 mujoco = solver._mujoco
-                # Every world follows the cone of the solver's native model; adhesion is part of the reported force.
+                # Every world follows the options of the solver's native model; adhesion is part of the reported force.
                 solver.mj_model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+                solver._cpu.model_field("geom_adhesion")[:] = 0.5
                 if world_count == 1:
-                    # A single world runs on the solver's native model, here with more rows per contact.
-                    solver.mj_model.geom_condim[:] = 6
-                    solver.mj_model.geom_adhesion[:] = 0.5
-                    mujoco.mj_setConst(solver.mj_model, mujoco.MjData(solver.mj_model))
-                else:
-                    solver._cpu.model_field("geom_adhesion")[:] = 0.5
-                    solver._cpu.batch.set_const()
-                    solver._cpu.model_changed()
+                    # More constraint rows per contact than the MuJoCo Warp data was sized for.
+                    solver._cpu.model_field("geom_condim")[:] = 6
+                solver._cpu.batch.set_const()
+                solver._cpu.model_changed()
                 contacts = newton.Contacts(solver.get_max_contact_count(), 0, device=model.device)
                 observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
                 state_0, state_1 = model.state(), model.state()
