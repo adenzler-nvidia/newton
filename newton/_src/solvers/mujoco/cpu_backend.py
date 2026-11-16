@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import copy
 import ctypes
-import glob
-import os
-import sys
+import functools
 from collections.abc import Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any
@@ -78,74 +76,20 @@ def _copy_from_native(native: wp.array2d[wp.float64], target: wp.array2d[float])
     target[world, i] = wp.float32(native[world, i])
 
 
-@wp.kernel(module="unique")
-def _count_replay(replays: wp.array[int]):
-    replays[0] = replays[0] + 1
-
-
 @wp.func_native("""
-typedef int32_t mjb_step_t(void*, const int*, int, int, int);
-failed[0] = ((mjb_step_t*)function)((void*)batch, nullptr, 0, 1, 0);
+typedef void host_function_t(void);
+((host_function_t*)function)();
 """)
-def _call_mjb_step(function: wp.uint64, batch: wp.uint64, failed: wp.array[int]): ...
-
-
-@wp.func_native("""
-typedef int32_t mjb_forward_t(void*, const int*, int, int);
-failed[0] = ((mjb_forward_t*)function)((void*)batch, nullptr, 0, stage);
-""")
-def _call_mjb_forward(function: wp.uint64, batch: wp.uint64, stage: int, failed: wp.array[int]): ...
+def _call_host_function(function: wp.uint64): ...
 
 
 @wp.kernel(module="unique")
-def _step_native(function: wp.uint64, batch: wp.uint64, failed: wp.array[int]):
-    _call_mjb_step(function, batch, failed)
+def _call_host(function: wp.uint64):
+    """Call a host function, which lets a CPU graph replay work that is not a kernel."""
+    _call_host_function(function)
 
 
-@wp.kernel(module="unique")
-def _forward_native(function: wp.uint64, batch: wp.uint64, stage: int, failed: wp.array[int]):
-    _call_mjb_forward(function, batch, stage, failed)
-
-
-def _native_library(mujoco: Any) -> Any:
-    """Return MuJoCo's shared library, whose C batch functions a Warp kernel can call."""
-    directory = os.path.dirname(mujoco.__file__)
-    for pattern in ("libmujoco.so*", "libmujoco*.dylib", "mujoco.dll"):
-        for path in glob.glob(os.path.join(directory, pattern)):
-            return ctypes.CDLL(path)
-    return None
-
-
-def _batch_address(library: Any, batch: Any) -> int | None:
-    """Return the address of the batch's ``mjBatch``, or None if it cannot be found.
-
-    PROTOTYPE: MuJoCo's Python bindings do not expose this address, so it is searched
-    for in the binding object and recognized by the address of its state rows.
-    """
-    if library is None or not sys.platform.startswith("linux"):
-        return None
-    library.mjb_state.restype = ctypes.c_void_p
-    library.mjb_state.argtypes = [ctypes.c_void_p]
-    spans = []
-    with open("/proc/self/maps") as maps:
-        for line in maps:
-            span, permissions = line.split()[:2]
-            if permissions.startswith("rw"):
-                spans.append(tuple(int(value, 16) for value in span.split("-")))
-
-    def readable(address: int) -> bool:
-        return any(low <= address and address + 4096 <= high for low, high in spans)
-
-    def words(address: int) -> list[int]:
-        return np.frombuffer(ctypes.string_at(address, 64), dtype=np.uint64).tolist()
-
-    state = batch.state.ctypes.data
-    for value in words(id(batch._b)):
-        if readable(value):
-            for candidate in words(value):
-                if readable(candidate) and library.mjb_state(candidate) == state:
-                    return candidate
-    return None
+_HOST_FUNCTION = ctypes.CFUNCTYPE(None)
 
 
 class MuJoCoCPUBackend:
@@ -189,22 +133,16 @@ class MuJoCoCPUBackend:
         self._const_stale = np.zeros(nworld, dtype=bool)
         self._const_inputs = frozenset(getattr(mujoco.MjModel, "_setconst_inputs", ()))
         self._timestep: float | None = None
-        # On the CPU device, kernels copy the state and call MuJoCo's C batch functions, so that
-        # a step consists of kernel launches only and a Warp CPU graph can replay it.
+        # On the CPU device, a step consists of kernel launches only, so that a Warp CPU graph can replay
+        # it: kernels copy the state, and a kernel calls back into Python to run the batch.
         self._arrays: dict[str, tuple[wp.array, wp.array, Any]] = {}
-        self._native_call = None
+        self._host_calls: dict[str, tuple[Any, wp.uint64]] = {}
+        self._host_error: BaseException | None = None
+        self._data_outdated = False
         if self._device.is_cpu:
-            library = _native_library(mujoco)
-            address = _batch_address(library, self.batch)
-            if address is not None:
-                functions = [ctypes.cast(f, ctypes.c_void_p).value for f in (library.mjb_step, library.mjb_forward)]
-                self._native_call = (wp.uint64(address), *map(wp.uint64, functions))
-                self._failed = wp.zeros(1, dtype=int, device="cpu")
-                self._failed_view = self._failed.numpy()
-        # Counts the state changes that a graph replayed, after which the solver's mj_data is outdated.
-        self._replays = wp.zeros(1, dtype=int, device="cpu")
-        self._replays_view = self._replays.numpy()
-        self._replays_shown = 0
+            for name, run in (("step", self.batch.step), ("forward", self.batch.forward)):
+                callback = _HOST_FUNCTION(functools.partial(self._run_from_kernel, run))
+                self._host_calls[name] = (callback, wp.uint64(ctypes.cast(callback, ctypes.c_void_p).value))
         # Newton only defines the size components that a geom's collision shape uses. MuJoCo compiles
         # the others for rendering, such as a plane's extent and grid spacing, or from mesh bounds.
         geom = mujoco.mjtGeom
@@ -238,47 +176,58 @@ class MuJoCoCPUBackend:
 
     def step(self) -> None:
         """Advance every world by one timestep, continuing from a :meth:`forward` pass that was just run."""
-        if self._native_call is None:
-            self.batch.step()
-        else:
-            batch, step, _ = self._native_call
-            wp.launch(_step_native, dim=1, inputs=[step, batch], outputs=[self._failed], device="cpu")
-        self._ran()
+        self._run("step", self.batch.step)
 
     def forward(self) -> None:
         """Run the forward dynamics of every world."""
-        if self._native_call is None:
-            self.batch.forward()
-        else:
-            batch, _, forward = self._native_call
-            stage = int(self._mujoco.mjtStage.mjSTAGE_ACC)
-            wp.launch(_forward_native, dim=1, inputs=[forward, batch, stage], outputs=[self._failed], device="cpu")
-        self._ran()
+        self._run("forward", self.batch.forward)
 
-    def _ran(self) -> None:
-        """Report failures and show the first world, once the native worlds have changed."""
+    def _run(self, name: str, run: Callable[[], None]) -> None:
+        if self._device.is_cpu:
+            wp.launch(_call_host, dim=1, inputs=[self._host_calls[name][1]], device="cpu")
+        else:
+            run()
+        self._changed()
+
+    def _run_from_kernel(self, run: Callable[[], None]) -> None:
+        # An exception cannot pass through the kernel that calls this; it is raised by the next call.
+        if self._host_error is None:
+            try:
+                run()
+            except BaseException as error:
+                self._host_error = error
+        self._data_outdated = True
+
+    def _host_only(self) -> None:
+        """Reject host work that a graph capture would run once, on values of before the captured steps."""
         if self._device.is_capturing:
-            # Nothing has run yet; the solver's mj_data is updated when it is read after a replay.
-            wp.launch(_count_replay, dim=1, inputs=[self._replays], device="cpu")
-            return
-        if self._native_call is not None and self._failed_view[0]:
-            self._failed_view[0] = 0
-            failed = np.flatnonzero(self.batch.status)
-            raise RuntimeError(f"MuJoCo failed in worlds {failed.tolist()}: {self.batch.error(int(failed[0]))}")
-        self.show_data()
+            raise RuntimeError(
+                "This step uses MuJoCo CPU backend features that a Warp graph cannot replay: contact export, "
+                "observables, masked updates, and model changes. Capture steps without them."
+            )
+
+    def _changed(self) -> None:
+        """Report failures and show the first world, once the native worlds have changed."""
+        # While a graph is captured, nothing has run yet.
+        if not self._device.is_capturing:
+            self.show_data()
 
     def show_data(self) -> None:
         """Show the first world's data in the solver's ``mj_data``."""
+        if self._host_error is not None:
+            error, self._host_error = self._host_error, None
+            raise error
         self.batch.get_data(0, self._data[0])
-        self._replays_shown = int(self._replays_view[0])
+        self._data_outdated = False
 
     def show_replayed_data(self) -> None:
         """Show the first world's data if a graph replay changed it since it was last shown."""
-        if self._replays_view[0] != self._replays_shown:
+        if self._data_outdated:
             self.show_data()
 
     def set_const(self) -> None:
         """Recompute the model constants of the worlds whose model changed and read the ones Newton's kernels use."""
+        self._host_only()
         self.flush()
         if self._const_stale.any():
             self.batch.set_const(np.flatnonzero(self._const_stale))
@@ -293,12 +242,14 @@ class MuJoCoCPUBackend:
 
     def reset(self, worlds: Sequence[int] | None = None) -> None:
         """Clear the buffers that persist between steps in the selected worlds."""
+        self._host_only()
         for name in _RESET_FIELDS:
             self.batch.bind(name)[slice(None) if worlds is None else worlds] = 0.0
         self.show_data()
 
     def worlds(self) -> list[tuple[Any, Any]]:
         """Return a copy of every world's model and data, which the next change to the batch outdates."""
+        self._host_only()
         for _ in range(len(self._models), self.nworld):
             self._models.append(copy.copy(self._model))
             self._data.append(self._mujoco.MjData(self._model))
@@ -404,8 +355,9 @@ class MuJoCoCPUBackend:
                 if native.size:
                     kernel = _copy_flags_to_native if staged.dtype is wp.bool else _copy_to_native
                     wp.launch(kernel, dim=native.shape, inputs=[staged], outputs=[native], device="cpu")
-            self._ran()
+            self._changed()
             return
+        self._host_only()
         rows = slice(None) if worlds is None else worlds
         for name in names:
             native = self.batch.bind(name)
@@ -519,6 +471,7 @@ class MuJoCoCPUBackend:
 
     def contact_count(self) -> int:
         """Return the number of contacts over all worlds."""
+        self._host_only()
         return int(self.batch.bind("ncon").sum())
 
     def contact_data(self, count: int, device: wp.Device) -> SimpleNamespace:

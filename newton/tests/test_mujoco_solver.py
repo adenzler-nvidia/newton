@@ -15885,6 +15885,13 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         self.assertGreater(np.ptp(final[0].reshape(model.world_count, -1)[:, -1]), 1.0e-3)
         np.testing.assert_array_equal(final[1], final[0])
 
+        # Host work that a replay would skip cannot be captured.
+        contacts = newton.Contacts(solver.get_max_contact_count(), 0, device=model.device)
+        observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
+        with self.assertRaisesRegex(RuntimeError, "graph cannot replay"):
+            with wp.ScopedCapture(device="cpu"):
+                solver.step(state_0, state_1, control, contacts, 0.002, observables=observables)
+
     def test_kinematic_root_in_one_world(self):
         """Hold a root kinematic in one world while the same root falls in the others."""
         model = self._build_model()
