@@ -925,18 +925,13 @@ per-world properties on both backends.
 :meth:`~newton.solvers.SolverMuJoCo.reset` clears the native buffers of the
 selected worlds only.
 
-The batch holds the model fields of every world, and ``solver.mj_model`` shows
-the first world. Writes to its arrays have no effect on the simulation; change
-the corresponding :class:`~newton.Model` properties and call
-:meth:`~newton.solvers.SolverMuJoCo.notify_model_changed` instead. Options
-written to ``solver.mj_model.opt`` are read back before every step and apply to
-every world, except for the timestep, which each step sets.
-``solver.mj_data`` is the first world's data. Each step sets its coordinates,
-velocities, mocap poses, controls, and applied forces from Newton's
-:class:`~newton.State` and :class:`~newton.Control`; other state written to
-it, such as ``time`` and ``act``, takes effect at the next step. The batch runs
-only C physics callbacks, so stepping raises while a Python function is
-installed as a MuJoCo callback, for example with ``mujoco.set_mjcb_control``.
+The batch holds the model and state of every world; ``solver.mj_model`` and
+``solver.mj_data`` show the first world. Writes to them have no effect on the
+simulation: change the corresponding :class:`~newton.Model`,
+:class:`~newton.State`, and :class:`~newton.Control` properties, or the solver's
+constructor arguments, instead. The batch runs only C physics callbacks, so
+stepping raises while a Python function is installed as a MuJoCo callback, for
+example with ``mujoco.set_mjcb_control``.
 
 
 Runtime state synchronization

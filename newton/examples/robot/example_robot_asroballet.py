@@ -608,8 +608,8 @@ class _AsRoBalletController:
             use_mujoco_cpu=True,
             use_mujoco_contacts=True,
             enable_multiccd=True,
+            noslip_iterations=1,
         )
-        self.solver.mj_model.opt.noslip_iterations = 1
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()

@@ -4521,9 +4521,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             magnetic: Global magnetic flux vector (x, y, z). If None, uses model custom attribute or MuJoCo's default (0, -0.5, 0).
             use_mujoco_cpu: If True, use MuJoCo's C implementation instead of `mujoco_warp`. A
                 ``mujoco.batch.Batch`` runs the worlds with per-world model properties, as with `mujoco_warp`.
-                ``mj_model`` and ``mj_data`` show the first world. Of ``mj_model``, only the options can be
-                written, which then apply to every world. Of ``mj_data``, state that Newton does not set from its
-                :class:`~newton.State` and :class:`~newton.Control`, such as ``time`` and ``act``, can be written.
+                ``mj_model`` and ``mj_data`` show the first world; writes to them do not affect the simulation.
             nthread: Number of threads that step the worlds with ``use_mujoco_cpu=True``, at most one per world.
                 If None, MuJoCo uses every CPU.
             enable_multiccd: If True, enable multi-CCD contact generation (up to 4 contact points per geom pair instead of 1). If False, disable it. If None, use the model custom attribute or disable it by default. Note: geom pairs where either geom has ``margin > 0`` always produce a single contact regardless of this flag. With the MuJoCo Warp backend and ``use_mujoco_contacts=True``, all geom and pair margins are zeroed when the model has box geoms and NATIVECCD (the default) or multi-CCD is enabled, or has mesh geoms and multi-CCD is enabled; see *Margin zeroing* in the MuJoCo solver docs. The CPU backend keeps them.
@@ -6257,15 +6255,14 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         )
         # After non-RK4 integration, MuJoCo retains the input contact geometry and forces.
         contacts_after_step = self.mj_model.opt.integrator != mujoco.mjtIntegrator.mjINT_RK4
-        forward = needs_body_observables or (needs_contact_observables and not contacts_after_step)
-        if forward:
+        if needs_body_observables or (needs_contact_observables and not contacts_after_step):
             # Export while qvel, cvel, cdof_dot, and the constraint solve agree; the step continues from here.
             cpu.forward()
             if needs_body_observables:
                 self._update_body_observables(self.model, state_out, observables)
             if needs_contact_observables and not contacts_after_step:
                 self._populate_contact_observables(observables.contacts, observables.contact_f, warning_stacklevel=5)
-        cpu.step(after_forward=forward)
+        cpu.step()
         if needs_contact_observables and contacts_after_step:
             self._populate_contact_observables(observables.contacts, observables.contact_f, warning_stacklevel=5)
 
@@ -6296,8 +6293,6 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             if self._cpu is not None:
                 self._cpu.pull_data(("xipos", "subtree_com", "cvel"))
                 self._cpu.pull_rne_postconstraint()
-                # The native models are writable, so use the gravity they solved with.
-                self._cpu.pull_options(("gravity",))
             wp.launch(
                 convert_rigid_forces_from_mj_kernel,
                 (nworld, nbody),
@@ -6709,8 +6704,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             dim=contacts.rigid_contact_max if preserve_geometry else max(mj_data.naconmax, 1),
             inputs=[
                 self.mjc_geom_to_newton_shape,
-                # The native models are writable and share the first one's cone.
-                self.mjw_model.opt.cone if self._cpu is None else int(self.mj_model.opt.cone),
+                self.mjw_model.opt.cone,
                 mj_data.nacon,
                 mj_contact.pos,
                 mj_contact.frame,

@@ -1207,7 +1207,7 @@ def test_revolute_loop_joint(test, device, solver_fn):
 
     if solver.use_mujoco_cpu:
         solver._cpu.model_field("eq_solref")[:] = [0.001, 1.0]
-        solver.mj_model.opt.gravity[:] = [0.0, -9.81, -5.0]
+        solver._cpu.option("gravity")[:] = [0.0, -9.81, -5.0]
     else:
         sr = solver.mjw_model.eq_solref.numpy()
         sr[:] = [0.001, 1.0]

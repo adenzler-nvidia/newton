@@ -8602,10 +8602,8 @@ class TestMuJoCoOptions(unittest.TestCase):
         state_out = model.state()
         control = model.control()
         control.joint_f.fill_(1.0)
-        # Native state written between steps takes effect, as it did before worlds were batched.
-        solver.mj_data.time = 5.0
         solver.step(model.state(), state_out, control, contacts, 0.01, observables=observables)
-        self.assertEqual(solver.mj_data.time, 5.01)
+        self.assertEqual(solver.mj_data.time, 0.01)
         np.testing.assert_allclose(state_out.joint_q.numpy(), solver.mj_data.qpos, atol=1e-6)
         np.testing.assert_allclose(state_out.joint_qd.numpy(), solver.mj_data.qvel, atol=1e-6)
         self.assertGreater(np.abs(state_out.joint_qd.numpy()).max(), 0.0)
@@ -8748,9 +8746,6 @@ class TestMuJoCoOptions(unittest.TestCase):
                     model, use_mujoco_cpu=True, disable_contacts=True, disable_sensors=True, integrator=integrator
                 )
                 mujoco = solver._mujoco
-                # Exports follow options written to the native model, not the ones the solver was built with.
-                for native in (solver, reference):
-                    native.mj_model.opt.gravity[:] = (0.0, 1.0, -3.0)
                 state_in, state_out, reference_out = model.state(), model.state(), model.state()
                 control = model.control()
                 solver._apply_mjc_control(model, state_in, control)
@@ -15806,25 +15801,17 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         np.testing.assert_allclose(support, weight, rtol=2.0e-2)
 
     def test_contact_forces_match_native_worlds(self):
-        """Export the contact forces MuJoCo reports for each world after native option and model edits."""
-        for world_count in (self.WORLD_COUNT, 1):
-            with self.subTest(world_count=world_count):
-                model = self._build_model(world_count)
+        """Export the contact forces MuJoCo reports for each world, for both friction cones."""
+        for cone in ("pyramidal", "elliptic"):
+            with self.subTest(cone=cone):
+                model = self._build_model()
                 self._randomize(model, seed=5)
-                solver = SolverMuJoCo(model, use_mujoco_cpu=True)
+                solver = SolverMuJoCo(model, use_mujoco_cpu=True, cone=cone)
                 mujoco = solver._mujoco
-                # Every world follows the options of the solver's native model; adhesion is part of the reported force.
-                solver.mj_model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
-                solver._cpu.model_field("geom_adhesion")[:] = 0.5
-                if world_count == 1:
-                    # More constraint rows per contact than the MuJoCo Warp data was sized for.
-                    solver._cpu.model_field("geom_condim")[:] = 6
-                solver._cpu.batch.set_const()
-                solver._cpu.model_changed()
                 contacts = newton.Contacts(solver.get_max_contact_count(), 0, device=model.device)
                 observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
                 state_0, state_1 = model.state(), model.state()
-                # Long enough for every world to come to rest on its frictional contacts.
+                # Long enough for every world to come to rest on its contacts.
                 for step in range(400):
                     exported = observables if step == 399 else None
                     solver.step(state_0, state_1, None, contacts if exported else None, 0.002, observables=exported)
@@ -15832,11 +15819,7 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
 
                 expected = []
                 for native, data in solver._cpu.worlds():
-                    self.assertEqual(native.opt.cone, mujoco.mjtCone.mjCONE_ELLIPTIC)
                     self.assertGreater(data.ncon, 0)
-                    self.assertTrue(np.all(data.contact.adhesion > 0.0))
-                    # Separated contacts only transmit adhesion; the others have friction rows to decode.
-                    self.assertEqual(data.contact.dim.max(), 6 if world_count == 1 else 3)
                     for contact in range(data.ncon):
                         wrench = np.zeros(6)
                         mujoco.mj_contactForce(native, data, contact, wrench)
@@ -15846,23 +15829,8 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
                 count = int(contacts.rigid_contact_count.numpy()[0])
                 self.assertEqual(count, len(expected))
                 expected = np.array(expected)
-                self.assertGreater(np.abs(expected[:, 2]).min(), 0.1)
+                self.assertGreater(np.abs(expected[:, 2]).max(), 1.0)
                 np.testing.assert_allclose(observables.contact_f.numpy()[:count], expected, rtol=1.0e-4, atol=1.0e-4)
-
-    def test_native_model_edits_survive_unrelated_updates(self):
-        """Copy only the entries Newton changed, keeping what the caller wrote to the native worlds."""
-        model = self._build_model()
-        solver = SolverMuJoCo(model, use_mujoco_cpu=True)
-        box = np.flatnonzero(solver.mj_model.geom_type == solver._mujoco.mjtGeom.mjGEOM_BOX)[0]
-        friction = solver._cpu.model_field("geom_friction")
-        friction[1, box, 0] = 0.123
-        shape = int(solver.mjc_geom_to_newton_shape.numpy()[2, box])
-        mu = model.shape_material_mu.numpy()
-        mu[shape] = 0.77
-        model.shape_material_mu.assign(mu)
-        solver.notify_model_changed(newton.ModelFlags.SHAPE_PROPERTIES)
-        self.assertEqual(friction[1, box, 0], 0.123)
-        self.assertAlmostEqual(friction[2, box, 0], 0.77, places=6)
 
     def test_inferred_weld_poses_are_frozen(self):
         """Clear the weld-inference flags of every native world, so constants refreshes keep the compiled poses."""

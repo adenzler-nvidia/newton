@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import copy
-import operator
 from collections.abc import Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any
@@ -67,9 +66,7 @@ class MuJoCoCPUBackend:
 
     The batch holds every model field that Newton sets as one ``[nworld, ...]`` array and
     every world's state as a row of its state array. The solver's ``mj_model`` and
-    ``mj_data`` show the first world. Before every step, the options of ``mj_model`` are
-    read back and given to every world, as is the state of ``mj_data`` that Newton does
-    not set from its own state and control; other writes to them have no effect.
+    ``mj_data`` show the first world; writes to them have no effect.
     """
 
     def __init__(
@@ -90,18 +87,15 @@ class MuJoCoCPUBackend:
         self._models = [mj_model]
         self._data = [mj_data]
         self._models_stale = False
-        self._read_first_state()
-        self.batch.state[1:] = self.batch.state[0]
+        state = np.empty(self.batch.nstate)
+        mujoco.mj_getState(mj_model, mj_data, state, mujoco.mjtState.mjSTATE_INTEGRATION)
+        self.batch.state[:] = state
         self._scratch: Any = None
         self._fields: dict[str, np.ndarray] = {}
         # Worlds whose model changed since its constants were computed, and the fields the constants depend on.
         self._const_stale = np.zeros(nworld, dtype=bool)
         self._const_inputs = frozenset(getattr(mujoco.MjModel, "_setconst_inputs", ()))
         self._timestep: float | None = None
-        # Options that callers may write to the solver's model; the timestep is set by every step.
-        self._option_names = sorted(f[4:] for f in batch.MODEL_FIELDS if f.startswith("opt.") and f != "opt.timestep")
-        self._get_options = operator.attrgetter(*self._option_names)
-        self._options = self._read_options()
         # Newton only defines the size components that a geom's collision shape uses. MuJoCo compiles
         # the others for rendering, such as a plane's extent and grid spacing, or from mesh bounds.
         geom = mujoco.mjtGeom
@@ -131,50 +125,19 @@ class MuJoCoCPUBackend:
         if dt != self._timestep:
             self.option("timestep")[:] = dt
             self._timestep = dt
-            self.model_changed()
+            self._model_changed()
 
-    def step(self, after_forward: bool = False) -> None:
-        """Advance every world by one timestep.
-
-        Args:
-            after_forward: Continue from the :meth:`forward` pass that was just run.
-        """
-        if not after_forward:
-            self._begin()
+    def step(self) -> None:
+        """Advance every world by one timestep, continuing from a :meth:`forward` pass that was just run."""
         self.batch.step()
         self.batch.get_data(0, self._data[0])
 
     def forward(self) -> None:
         """Run the forward dynamics of every world."""
-        self._begin()
         self.batch.forward()
         self.batch.get_data(0, self._data[0])
 
-    def _begin(self) -> None:
-        self._sync_options()
-        self._read_first_state()
-
-    def _read_options(self) -> tuple:
-        values = self._get_options(self._model.opt)
-        return tuple(value.tobytes() if isinstance(value, np.ndarray) else value for value in values)
-
-    def _sync_options(self) -> None:
-        """Give every world the options that callers wrote to the solver's ``mj_model``."""
-        options = self._read_options()
-        if options != self._options:
-            for name, value, previous in zip(self._option_names, options, self._options, strict=True):
-                if value != previous:
-                    self.option(name)[:] = getattr(self._model.opt, name)
-            self._options = options
-            self._const_stale[:] = True
-            self._models_stale = True
-
-    def _read_first_state(self) -> None:
-        """Take the first world's state from the solver's ``mj_data``, which callers may have written."""
-        integration = self._mujoco.mjtState.mjSTATE_INTEGRATION
-        self._mujoco.mj_getState(self._model, self._data[0], self.batch.state[0], integration)
-
-    def _write_first_state(self) -> None:
+    def _show_first_state(self) -> None:
         """Show the first world's state in the solver's ``mj_data``."""
         integration = self._mujoco.mjtState.mjSTATE_INTEGRATION
         self._mujoco.mj_setState(self._model, self._data[0], self.batch.state[0], integration)
@@ -185,7 +148,7 @@ class MuJoCoCPUBackend:
         if self._const_stale.any():
             self.batch.set_const(np.flatnonzero(self._const_stale))
             self._const_stale[:] = False
-            self.model_changed()
+            self._model_changed()
         self.pull_model(_SET_CONST_FIELDS)
 
     def _scratch_data(self) -> Any:
@@ -195,10 +158,9 @@ class MuJoCoCPUBackend:
 
     def reset(self, worlds: Sequence[int] | None = None) -> None:
         """Clear the buffers that persist between steps in the selected worlds."""
-        self._read_first_state()
         for name in _RESET_FIELDS:
             self.batch.bind(name)[slice(None) if worlds is None else worlds] = 0.0
-        self._write_first_state()
+        self._show_first_state()
 
     def worlds(self) -> list[tuple[Any, Any]]:
         """Return a copy of every world's model and data, which the next change to the batch outdates."""
@@ -214,12 +176,9 @@ class MuJoCoCPUBackend:
             self.batch.get_data(world, self._data[world])
         return list(zip(self._models, self._data, strict=True))
 
-    def model_changed(self) -> None:
-        """Show the first world's model in the solver's ``mj_model`` after writes to the native fields."""
-        # Options that callers wrote to the solver's model must reach the batch before they are overwritten.
-        self._sync_options()
+    def _model_changed(self) -> None:
+        """Show the first world's model in the solver's ``mj_model``."""
         self.batch.get_model(0, self._model)
-        self._options = self._read_options()
         self._models_stale = True
 
     # ------------------------------------------------------------------
@@ -251,7 +210,7 @@ class MuJoCoCPUBackend:
         """Copy the entries of a MuJoCo Warp model field that were changed to the native worlds.
 
         Other native entries are left alone, so constants that MuJoCo computed in double
-        precision and entries that the caller wrote survive unrelated updates.
+        precision survive unrelated updates.
         """
         native = self.model_field(name)
         if not native.size:
@@ -282,12 +241,11 @@ class MuJoCoCPUBackend:
     def push_data(self, names: Iterable[str], worlds: Sequence[int] | None = None) -> None:
         """Copy MuJoCo Warp data fields to the native state of the selected worlds."""
         rows = slice(None) if worlds is None else worlds
-        self._read_first_state()
         for name in names:
             native = self.batch.bind(name)
             if native.size:
                 native[rows] = self._host.read(getattr(self._mjw_data, name)).reshape(native.shape)[rows]
-        self._write_first_state()
+        self._show_first_state()
 
     def pull_data(self, names: Iterable[str]) -> None:
         """Copy native data fields of every world to the MuJoCo Warp data."""
@@ -304,11 +262,6 @@ class MuJoCoCPUBackend:
         for name in ("cacc", "cfrc_int"):
             self._host.write(getattr(self._mjw_data, name), np.stack([getattr(data, name) for _, data in worlds]))
 
-    def pull_options(self, names: Iterable[str]) -> None:
-        """Copy native option fields of every world to the MuJoCo Warp model."""
-        for name in names:
-            self._host.write(getattr(self._mjw_model.opt, name), self.option(name))
-
     def set_options(self, options: dict[str, np.ndarray]) -> None:
         """Set ``MjOption`` fields from one value per world, or a single value shared by all worlds."""
         for name, option in options.items():
@@ -322,7 +275,7 @@ class MuJoCoCPUBackend:
                 continue
             self._const_stale |= changed.reshape(self.nworld, -1).any(axis=1)
             np.copyto(current, values, where=changed)
-        self.model_changed()
+        self._model_changed()
 
     def flush(self) -> None:
         """Copy the MuJoCo Warp fields written since the last call to the native worlds."""
@@ -330,7 +283,7 @@ class MuJoCoCPUBackend:
             changed = [self._push_model(name, before) for name, before in self._model_before.items()]
             self._model_before.clear()
             if any(changed):
-                self.model_changed()
+                self._model_changed()
         if self._dirty_data:
             self.push_data(self._dirty_data)
             self._dirty_data.clear()
@@ -381,7 +334,7 @@ class MuJoCoCPUBackend:
                 biasprm[world, actuator, 2] = (
                     -ratio[actuator] * 2.0 * np.sqrt(m.actuator_gainprm[actuator, 0] * inertia)
                 )
-        self.model_changed()
+        self._model_changed()
         self.pull_model(("actuator_biasprm",))
 
     def frictionloss_force(self) -> np.ndarray:
@@ -432,10 +385,8 @@ class MuJoCoCPUBackend:
             efc_address[rows] = contact.efc_address[:n]
             worldid[rows] = world
             start += n
-        # A native contact's constraint rows are contiguous; MuJoCo Warp addresses each row. Callers may
-        # have raised the contact dimension of a native model, which then has more rows than MuJoCo Warp's.
-        max_dim = int(dim[:start].max(initial=1))
-        rows_per_contact = max(self._mjw_data.contact.efc_address.shape[1], max_dim, 2 * (max_dim - 1))
+        # A native contact's constraint rows are contiguous; MuJoCo Warp addresses each row.
+        rows_per_contact = self._mjw_data.contact.efc_address.shape[1]
         efc_rows = np.where(efc_address[:, None] >= 0, efc_address[:, None] + np.arange(rows_per_contact), -1)
         return SimpleNamespace(
             nacon=wp.array([count], dtype=wp.int32, device=device),
