@@ -15807,37 +15807,50 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
 
     def test_contact_forces_match_native_worlds(self):
         """Export the contact forces MuJoCo reports for each world after native option and model edits."""
-        model = self._build_model()
-        self._randomize(model, seed=5)
-        solver = SolverMuJoCo(model, use_mujoco_cpu=True)
-        mujoco = solver._mujoco
-        # Every world follows the cone of the solver's native model; adhesion is part of the reported force.
-        solver.mj_model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
-        solver._cpu.model_field("geom_adhesion")[:] = 3.0
-        solver._cpu.batch.set_const()
-        solver._cpu.model_changed()
-        contacts = newton.Contacts(solver.get_max_contact_count(), 0, device=model.device)
-        observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
-        self._simulate(solver, 100)
-        state = model.state()
-        solver.step(state, model.state(), None, contacts, 0.002, observables=observables)
+        for world_count in (self.WORLD_COUNT, 1):
+            with self.subTest(world_count=world_count):
+                model = self._build_model(world_count)
+                self._randomize(model, seed=5)
+                solver = SolverMuJoCo(model, use_mujoco_cpu=True)
+                mujoco = solver._mujoco
+                # Every world follows the cone of the solver's native model; adhesion is part of the reported force.
+                solver.mj_model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+                if world_count == 1:
+                    # A single world runs on the solver's native model, here with more rows per contact.
+                    solver.mj_model.geom_condim[:] = 6
+                    solver.mj_model.geom_adhesion[:] = 0.5
+                    mujoco.mj_setConst(solver.mj_model, mujoco.MjData(solver.mj_model))
+                else:
+                    solver._cpu.model_field("geom_adhesion")[:] = 0.5
+                    solver._cpu.batch.set_const()
+                    solver._cpu.model_changed()
+                contacts = newton.Contacts(solver.get_max_contact_count(), 0, device=model.device)
+                observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
+                state_0, state_1 = model.state(), model.state()
+                # Long enough for every world to come to rest on its frictional contacts.
+                for step in range(400):
+                    exported = observables if step == 399 else None
+                    solver.step(state_0, state_1, None, contacts if exported else None, 0.002, observables=exported)
+                    state_0, state_1 = state_1, state_0
 
-        expected = []
-        for native, data in solver._cpu.worlds():
-            self.assertEqual(native.opt.cone, mujoco.mjtCone.mjCONE_ELLIPTIC)
-            self.assertGreater(data.ncon, 0)
-            self.assertTrue(np.all(data.contact.adhesion > 0.0))
-            for contact in range(data.ncon):
-                wrench = np.zeros(6)
-                mujoco.mj_contactForce(native, data, contact, wrench)
-                frame = data.contact.frame[contact].reshape(3, 3)
-                # Newton stores the wrench on the first shape in world coordinates.
-                expected.append(-np.concatenate((frame.T @ wrench[:3], frame.T @ wrench[3:])))
-        count = int(contacts.rigid_contact_count.numpy()[0])
-        self.assertEqual(count, len(expected))
-        expected = np.array(expected)
-        self.assertGreater(np.abs(expected[:, 2]).min(), 0.1)
-        np.testing.assert_allclose(observables.contact_f.numpy()[:count], expected, rtol=1.0e-4, atol=1.0e-4)
+                expected = []
+                for native, data in solver._cpu.worlds():
+                    self.assertEqual(native.opt.cone, mujoco.mjtCone.mjCONE_ELLIPTIC)
+                    self.assertGreater(data.ncon, 0)
+                    self.assertTrue(np.all(data.contact.adhesion > 0.0))
+                    # Separated contacts only transmit adhesion; the others have friction rows to decode.
+                    self.assertEqual(data.contact.dim.max(), 6 if world_count == 1 else 3)
+                    for contact in range(data.ncon):
+                        wrench = np.zeros(6)
+                        mujoco.mj_contactForce(native, data, contact, wrench)
+                        frame = data.contact.frame[contact].reshape(3, 3)
+                        # Newton stores the wrench on the first shape in world coordinates.
+                        expected.append(-np.concatenate((frame.T @ wrench[:3], frame.T @ wrench[3:])))
+                count = int(contacts.rigid_contact_count.numpy()[0])
+                self.assertEqual(count, len(expected))
+                expected = np.array(expected)
+                self.assertGreater(np.abs(expected[:, 2]).min(), 0.1)
+                np.testing.assert_allclose(observables.contact_f.numpy()[:count], expected, rtol=1.0e-4, atol=1.0e-4)
 
     def test_native_model_edits_survive_unrelated_updates(self):
         """Copy only the entries Newton changed, keeping what the caller wrote to the native worlds."""

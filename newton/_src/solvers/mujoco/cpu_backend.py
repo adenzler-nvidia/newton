@@ -468,8 +468,10 @@ class MuJoCoCPUBackend:
             efc_address[rows] = contact.efc_address[:n]
             worldid[rows] = world
             start += n
-        # A native contact's constraint rows are contiguous; MuJoCo Warp addresses each row.
-        rows_per_contact = self._mjw_data.contact.efc_address.shape[1]
+        # A native contact's constraint rows are contiguous; MuJoCo Warp addresses each row. Callers may
+        # have raised the contact dimension of a native model, which then has more rows than MuJoCo Warp's.
+        max_dim = int(dim[:start].max(initial=1))
+        rows_per_contact = max(self._mjw_data.contact.efc_address.shape[1], max_dim, 2 * (max_dim - 1))
         efc_rows = np.where(efc_address[:, None] >= 0, efc_address[:, None] + np.arange(rows_per_contact), -1)
         return SimpleNamespace(
             nacon=wp.array([count], dtype=wp.int32, device=device),
