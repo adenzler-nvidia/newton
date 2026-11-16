@@ -5940,10 +5940,10 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
 
     @property
     def mj_data(self) -> MjData:
-        """MuJoCo data of the first world, which the CPU backend updates when it is read."""
+        """MuJoCo data; the CPU backend shows its first world here."""
         cpu = getattr(self, "_cpu", None)
         if cpu is not None:
-            cpu.show_data()
+            cpu.show_replayed_data()
         return self._mj_data
 
     @mj_data.setter
