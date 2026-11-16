@@ -15727,7 +15727,6 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         serial = SolverMuJoCo(model, use_mujoco_cpu=True, nthread=1)
         warp = SolverMuJoCo(model)
         self.assertEqual(cpu._cpu.nworld, self.WORLD_COUNT)
-        self.assertIs(cpu._cpu.models[0], cpu.mj_model)
 
         self._randomize(model, seed=2)
         for solver in (cpu, serial, warp):
@@ -15746,9 +15745,11 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
                     self.assertFalse(np.allclose(native[0], native[1]))
                     randomized = getattr(warp.mjw_model, name).numpy().reshape(native.shape)
                     np.testing.assert_allclose(native[used], randomized[used], rtol=1.0e-5)
-        gravity = np.stack([m.opt.gravity for m in cpu._cpu.models])
-        np.testing.assert_allclose(gravity, model.gravity.numpy()[: self.WORLD_COUNT], rtol=1.0e-6)
-        np.testing.assert_array_equal([m.opt.impratio for m in cpu._cpu.models], impratio[: self.WORLD_COUNT])
+        np.testing.assert_allclose(cpu._cpu.option("gravity"), model.gravity.numpy()[: self.WORLD_COUNT], rtol=1.0e-6)
+        np.testing.assert_array_equal(cpu._cpu.option("impratio"), impratio[: self.WORLD_COUNT])
+        # The solver's native model shows the first world.
+        np.testing.assert_array_equal(cpu.mj_model.body_mass, cpu._cpu.model_field("body_mass")[0])
+        np.testing.assert_array_equal(cpu.mj_model.opt.gravity, cpu._cpu.option("gravity")[0])
 
         kinds = {
             cpu.ObservableKind.BODY_QDD,
@@ -15810,11 +15811,11 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         self._randomize(model, seed=5)
         solver = SolverMuJoCo(model, use_mujoco_cpu=True)
         mujoco = solver._mujoco
-        # Every world follows the first world's cone; adhesion is part of the reported force.
+        # Every world follows the cone of the solver's native model; adhesion is part of the reported force.
         solver.mj_model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
-        for native, _ in solver._cpu.worlds():
-            native.geom_adhesion[:] = 3.0
-            mujoco.mj_setConst(native, mujoco.MjData(native))
+        solver._cpu.model_field("geom_adhesion")[:] = 3.0
+        solver._cpu.batch.set_const()
+        solver._cpu.model_changed()
         contacts = newton.Contacts(solver.get_max_contact_count(), 0, device=model.device)
         observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
         self._simulate(solver, 100)
@@ -15839,19 +15840,19 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         np.testing.assert_allclose(observables.contact_f.numpy()[:count], expected, rtol=1.0e-4, atol=1.0e-4)
 
     def test_native_model_edits_survive_unrelated_updates(self):
-        """Copy only the entries Newton changed, keeping what the caller wrote to the native models."""
+        """Copy only the entries Newton changed, keeping what the caller wrote to the native worlds."""
         model = self._build_model()
         solver = SolverMuJoCo(model, use_mujoco_cpu=True)
-        native = [native for native, _ in solver._cpu.worlds()]
-        box = np.flatnonzero(native[0].geom_type == solver._mujoco.mjtGeom.mjGEOM_BOX)[0]
-        native[1].geom_friction[box, 0] = 0.123
+        box = np.flatnonzero(solver.mj_model.geom_type == solver._mujoco.mjtGeom.mjGEOM_BOX)[0]
+        friction = solver._cpu.model_field("geom_friction")
+        friction[1, box, 0] = 0.123
         shape = int(solver.mjc_geom_to_newton_shape.numpy()[2, box])
         mu = model.shape_material_mu.numpy()
         mu[shape] = 0.77
         model.shape_material_mu.assign(mu)
         solver.notify_model_changed(newton.ModelFlags.SHAPE_PROPERTIES)
-        self.assertEqual(native[1].geom_friction[box, 0], 0.123)
-        self.assertAlmostEqual(native[2].geom_friction[box, 0], 0.77, places=6)
+        self.assertEqual(friction[1, box, 0], 0.123)
+        self.assertAlmostEqual(friction[2, box, 0], 0.77, places=6)
 
     def test_inferred_weld_poses_are_frozen(self):
         """Clear the weld-inference flags of every native world, so constants refreshes keep the compiled poses."""
@@ -15873,8 +15874,7 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
                 builder.replicate(template, 2)
                 model = builder.finalize(device=device)
                 solver = SolverMuJoCo(model, use_mujoco_cpu=True, kinematic_switchable_roots=False)
-                for native in solver._cpu.models:
-                    np.testing.assert_array_equal(native.eq_data[:, 11], 0.0)
+                np.testing.assert_array_equal(solver._cpu.model_field("eq_data")[..., 11], 0.0)
 
     def test_kinematic_root_in_one_world(self):
         """Hold a root kinematic in one world while the same root falls in the others."""

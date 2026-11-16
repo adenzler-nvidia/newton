@@ -332,8 +332,8 @@ On the MuJoCo Warp backend, runtime joint- and tendon-limit updates are
 stored in ``solver.mjw_model.jnt_solref``, ``tendon_solref_lim``, and
 ``tendon_range`` per world. The corresponding arrays in the host template
 ``solver.mj_model`` are not updated; inspect the Warp arrays for current
-values. The MuJoCo CPU backend copies them to the native model of every world,
-of which ``solver.mj_model`` is the first.
+values. The MuJoCo CPU backend copies them to every native world, of which
+``solver.mj_model`` shows the first.
 
 .. note::
 
@@ -916,18 +916,22 @@ a negative world index — assigning any of them to the global world
 raises ``ValueError``. Only shapes may live in the global world (-1);
 they are shared across all worlds without replication.
 
-The MuJoCo CPU backend (``use_mujoco_cpu=True``) gives every world its own
-native ``MjModel`` and steps the worlds with a ``mujoco.batch.Batch`` on
-``nthread`` threads. Per-world model properties are written to the same
-MuJoCo Warp arrays as on the MuJoCo Warp backend and copied to the native
-models, so construction and
+The MuJoCo CPU backend (``use_mujoco_cpu=True``) runs the worlds in a
+``mujoco.batch.Batch`` on ``nthread`` threads. Per-world model properties are
+written to the same MuJoCo Warp arrays as on the MuJoCo Warp backend and
+copied to the batch, so construction and
 :meth:`~newton.solvers.SolverMuJoCo.notify_model_changed` support the same
 per-world properties on both backends.
 :meth:`~newton.solvers.SolverMuJoCo.reset` clears the native buffers of the
-selected worlds only. ``solver.mj_model`` and ``solver.mj_data`` are the first
-world's model and data. Options that MuJoCo Warp shares between worlds, such as
-the cone, the integrator, and the iteration counts, follow ``solver.mj_model.opt``
-in every world. The batch runs only C physics callbacks, so stepping
+selected worlds only.
+
+A single world runs on ``solver.mj_model`` itself. With several worlds, the
+batch holds the model fields per world, and ``solver.mj_model`` shows the first
+world: writes to its arrays have no effect, while the options that MuJoCo Warp
+shares between worlds, such as the cone, the integrator, and the iteration
+counts, are read from ``solver.mj_model.opt`` and apply to every world.
+``solver.mj_data`` is the first world's data, and state written to it takes
+effect at the next step. The batch runs only C physics callbacks, so stepping
 raises while a Python function is installed as a MuJoCo callback, for example
 with ``mujoco.set_mjcb_control``.
 
