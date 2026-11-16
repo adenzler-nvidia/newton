@@ -85,7 +85,8 @@ class MuJoCoCPUBackend:
     The batch holds every model field that differs between worlds as one ``[nworld, ...]``
     array and every world's state as a row of its state array. The solver's ``mj_model``
     and ``mj_data`` then show the first world: ``mj_data``'s state is read back before
-    every step, as are the options of ``mj_model`` that MuJoCo Warp shares between worlds.
+    every step, where Newton does not set it from its own state and control, as are the
+    options of ``mj_model`` that MuJoCo Warp shares between worlds.
     A single world runs on the solver's ``mj_model`` itself, so writes to it take effect.
     """
 
@@ -394,7 +395,8 @@ class MuJoCoCPUBackend:
             selected = [a for a in actuators if ratio[a] > 0.0]
             if not selected:
                 continue
-            d.qpos[:] = m.qpos0
+            # The reference configuration of this world, including its mocap poses.
+            mujoco.mj_resetData(m, d)
             mujoco.mj_kinematics(m, d)
             mujoco.mj_comPos(m, d)
             mujoco.mj_tendon(m, d)

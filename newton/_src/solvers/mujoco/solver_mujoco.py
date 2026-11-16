@@ -4522,7 +4522,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             use_mujoco_cpu: If True, use MuJoCo's C implementation instead of `mujoco_warp`. A
                 ``mujoco.batch.Batch`` runs the worlds with per-world model properties, as with `mujoco_warp`.
                 ``mj_model`` and ``mj_data`` show the first world; with several worlds, only the solver options
-                of ``mj_model`` and the state of ``mj_data`` can be written.
+                of ``mj_model`` can be written. Of ``mj_data``, state that Newton does not set from its
+                :class:`~newton.State` and :class:`~newton.Control`, such as ``time`` and ``act``, can be written.
             nthread: Number of threads that step the worlds with ``use_mujoco_cpu=True``, at most one per world.
                 If None, MuJoCo uses every CPU.
             enable_multiccd: If True, enable multi-CCD contact generation (up to 4 contact points per geom pair instead of 1). If False, disable it. If None, use the model custom attribute or disable it by default. Note: geom pairs where either geom has ``margin > 0`` always produce a single contact regardless of this flag. With the MuJoCo Warp backend and ``use_mujoco_contacts=True``, all geom and pair margins are zeroed when the model has box geoms and NATIVECCD (the default) or multi-CCD is enabled, or has mesh geoms and multi-CCD is enabled; see *Margin zeroing* in the MuJoCo solver docs. The CPU backend keeps them.

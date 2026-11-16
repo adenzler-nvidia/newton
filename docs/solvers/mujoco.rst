@@ -930,8 +930,10 @@ batch holds the model fields per world, and ``solver.mj_model`` shows the first
 world: writes to its arrays have no effect, while the options that MuJoCo Warp
 shares between worlds, such as the cone, the integrator, and the iteration
 counts, are read from ``solver.mj_model.opt`` and apply to every world.
-``solver.mj_data`` is the first world's data, and state written to it takes
-effect at the next step. The batch runs only C physics callbacks, so stepping
+``solver.mj_data`` is the first world's data. Each step sets its coordinates,
+velocities, mocap poses, controls, and applied forces from Newton's
+:class:`~newton.State` and :class:`~newton.Control`; other state written to
+it, such as ``time`` and ``act``, takes effect at the next step. The batch runs only C physics callbacks, so stepping
 raises while a Python function is installed as a MuJoCo callback, for example
 with ``mujoco.set_mjcb_control``.
 
