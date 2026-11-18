@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import ctypes
 import warnings
@@ -156,12 +157,14 @@ class _Replay:
                 run()
             except BaseException as error:
                 self.error = error
-                # The graph may have outlived the solver that raises this.
-                warnings.warn(
-                    f"MuJoCo failed during a graph replay, which stops running it: {error}",
-                    NewtonWarning,
-                    stacklevel=1,
-                )
+                # The graph may have outlived the solver that raises this. An exception cannot
+                # leave this function, also not one that a warning filter makes of the warning.
+                with contextlib.suppress(Warning):
+                    warnings.warn(
+                        f"MuJoCo failed during a graph replay, which stops running it: {error}",
+                        NewtonWarning,
+                        stacklevel=1,
+                    )
 
     def call(self, name: str) -> None:
         """Record a run of the batch."""
@@ -294,6 +297,12 @@ class MuJoCoCPUBackend:
             raise RuntimeError(
                 "A graph can only replay plain steps of the MuJoCo CPU backend, with the model on the CPU device. "
                 "Capture steps without contact export, observables, masked updates, and model changes."
+            )
+        # Warp has no public way to ask whether the capture can be saved.
+        if getattr(getattr(wp._src.context.runtime, "_apic_capture", None), "apic_savable", False):
+            raise RuntimeError(
+                "A graph of MuJoCo CPU backend steps cannot be saved, because it records a function of this "
+                "process. Capture it without apic=True."
             )
         if self._replay is None:
             self._replay = _Replay(self.batch, self._mjw_model, self._mjw_data)

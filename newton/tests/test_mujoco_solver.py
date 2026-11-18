@@ -15935,7 +15935,8 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         with wp.ScopedCapture(device="cpu") as capture:
             solver.step(state_0, state_1, control, None, 0.002)
         failing[0] = True
-        wp.capture_launch(capture.graph)
+        with self.assertWarnsRegex(newton.NewtonWarning, "native step failed"):
+            wp.capture_launch(capture.graph)
         failing[0] = False
         with self.assertRaisesRegex(ValueError, "native step failed"):
             solver.step(state_0, state_1, control, None, 0.002)
@@ -15950,6 +15951,10 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "only replay plain steps"):
             with wp.ScopedCapture(device="cpu"):
                 solver.notify_model_changed(ModelFlags.BODY_INERTIAL_PROPERTIES)
+        # A saved graph would call a function of this process from another one.
+        with self.assertRaisesRegex(RuntimeError, "cannot be saved"):
+            with wp.ScopedCapture(device="cpu", apic=True):
+                solver.step(state_0, state_1, control, None, 0.002)
 
     def test_kinematic_root_in_one_world(self):
         """Hold a root kinematic in one world while the same root falls in the others."""
