@@ -6222,12 +6222,11 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         joints_per_world = model.joint_count // nworld
         apply_particle_f = state.particle_f is not None and self._particle_qvel_adr.shape[0] > 0
         if self._cpu is not None:
-            # Native MuJoCo applies only the inputs of this call; MuJoCo Warp keeps the ones it is not given.
-            if apply_control and control is None:
+            # Native MuJoCo applies only the inputs of this call, so entries that the kernels below do
+            # not write are zero. MuJoCo Warp keeps the inputs it is not given.
+            if apply_control:
                 ctrl.zero_()
-            # The joint-force kernel does not write the particle DOFs.
-            particles = self._particle_qvel_adr.shape[0] > 0
-            if (apply_control or apply_particle_f) and (control is None or particles):
+            if apply_control or apply_particle_f:
                 qfrc.zero_()
         if control is not None:
             # Use instance arrays (built during MuJoCo model construction)
@@ -9442,9 +9441,14 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 pair_world = model.mujoco.pair_world.numpy()
                 pair_to_newton = np.tile(pair_to_newton_template, (nworld, 1))
                 per_world = pair_world[pair_to_newton_template] >= 0
-                rank = np.searchsorted(np.flatnonzero(pair_world == first_world), pair_to_newton_template[per_world])
-                for world in range(nworld):
-                    pair_to_newton[world, per_world] = np.flatnonzero(pair_world == first_world + world)[rank]
+                if nworld > 1 and per_world.any():
+                    rows = np.flatnonzero(pair_world >= 0)
+                    if rows.size % nworld:
+                        raise ValueError("Contact pairs must match across worlds when separate_worlds=True.")
+                    # Rows of each world, in their order.
+                    rows = rows[np.argsort(pair_world[rows], kind="stable")].reshape(nworld, -1)
+                    rank = np.searchsorted(rows[0], pair_to_newton_template[per_world])
+                    pair_to_newton[:, per_world] = rows[:, rank]
                 self._mjc_pair_to_newton_pair = wp.array(pair_to_newton, dtype=wp.int32)
             if heterogeneous_geoms:
                 self._initialize_geom_assets(

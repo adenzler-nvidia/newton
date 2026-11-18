@@ -16307,6 +16307,21 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
             with wp.ScopedCapture(device="cpu", apic=True):
                 solver.step(state_0, state_1, control, None, 0.002)
 
+    def test_omitted_targets_stop_driving(self):
+        """Clear the native controls of targets that the control no longer carries."""
+        model = self._build_model()
+        solver = SolverMuJoCo(model, use_mujoco_cpu=True)
+        state_0, state_1, control = model.state(), model.state(), model.control()
+        target = control.joint_target_q.numpy().reshape(model.world_count, -1)
+        target[:, -1] = 0.6
+        control.joint_target_q.assign(target.reshape(-1))
+        ctrl = solver._cpu.batch.bind("ctrl")
+        solver.step(state_0, state_1, control, None, 0.002)
+        self.assertGreater(np.abs(ctrl).min(), 0.1)
+        control.joint_target_q = None
+        solver.step(state_1, state_0, control, None, 0.002)
+        np.testing.assert_array_equal(ctrl, 0.0)
+
     def test_kinematic_root_in_one_world(self):
         """Hold a root kinematic in one world while the same root falls in the others."""
         model = self._build_model()
