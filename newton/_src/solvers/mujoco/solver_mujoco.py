@@ -9437,12 +9437,14 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 entity_shape_mapping(site_to_shape_idx, self.mj_model.nsite), dtype=wp.int32
             )
             if pair_to_newton_template.size:
-                # Each world's pairs follow the template's by a fixed stride; global pairs are shared.
+                # Each world's pairs follow the template's in the order of its own rows, which need not
+                # be contiguous; global pairs are shared.
                 pair_world = model.mujoco.pair_world.numpy()
-                stride = np.where(
-                    pair_world[pair_to_newton_template] >= 0, np.count_nonzero(pair_world == first_world), 0
-                )
-                pair_to_newton = pair_to_newton_template + np.arange(nworld)[:, None] * stride
+                pair_to_newton = np.tile(pair_to_newton_template, (nworld, 1))
+                per_world = pair_world[pair_to_newton_template] >= 0
+                rank = np.searchsorted(np.flatnonzero(pair_world == first_world), pair_to_newton_template[per_world])
+                for world in range(nworld):
+                    pair_to_newton[world, per_world] = np.flatnonzero(pair_world == first_world + world)[rank]
                 self._mjc_pair_to_newton_pair = wp.array(pair_to_newton, dtype=wp.int32)
             if heterogeneous_geoms:
                 self._initialize_geom_assets(

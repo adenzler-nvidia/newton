@@ -10330,12 +10330,17 @@ class TestMuJoCoSolverPairProperties(unittest.TestCase):
         builder = newton.ModelBuilder()
         SolverMuJoCo.register_custom_attributes(builder)
         builder.replicate(template, 2)
-        model = builder.finalize()
-        # World 1 doubles the friction of its pairs at runtime.
-        friction = model.mujoco.pair_friction.numpy()
-        friction[3:, 0] *= 2.0
-        for use_mujoco_cpu in (False, True):
-            with self.subTest(use_mujoco_cpu=use_mujoco_cpu):
+        for use_mujoco_cpu, interleave in itertools.product((False, True), repeat=2):
+            with self.subTest(use_mujoco_cpu=use_mujoco_cpu, interleave=interleave):
+                model = builder.finalize()
+                if interleave:
+                    # The rows of a world need not be contiguous.
+                    for name, values in vars(model.mujoco).items():
+                        if name.startswith("pair_"):
+                            values.assign(values.numpy()[[0, 3, 1, 4, 2, 5]])
+                # World 1 doubles the friction of its pairs at runtime.
+                friction = model.mujoco.pair_friction.numpy()
+                friction[model.mujoco.pair_world.numpy() == 1, 0] *= 2.0
                 solver = SolverMuJoCo(model, use_mujoco_cpu=use_mujoco_cpu)
                 names = [solver.mj_model.geom(geom).name for geom in range(solver.mj_model.ngeom)]
                 second = next(geom for geom, name in enumerate(names) if "second_geom" in name)
