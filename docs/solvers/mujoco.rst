@@ -1011,7 +1011,9 @@ simulation: change the corresponding :class:`~newton.Model`,
 :class:`~newton.State`, and :class:`~newton.Control` properties, or the solver's
 constructor arguments, instead. The batch runs only C physics callbacks, so
 stepping raises while a Python function is installed as a MuJoCo callback, for
-example with ``mujoco.set_mjcb_control``.
+example with ``mujoco.set_mjcb_control``. MuJoCo accepts a ``ctypes`` function
+that wraps a Python function instead; it holds the interpreter lock while it
+runs, which serializes the batch's threads.
 
 
 Runtime state synchronization
