@@ -258,11 +258,14 @@ def _warn_if_mujoco_versions_mismatch(mujoco: Any, mujoco_warp: Any) -> None:
 
 
 def _installed_version(package: str, module: Any) -> str | None:
+    # The legacy ``mujoco`` distribution installs over the files of ``mujoco-core``, whose metadata stays behind.
+    module_version = getattr(module, "__version__", None)
+    if module_version is not None:
+        return str(module_version)
     try:
         return importlib_metadata.version(package)
     except importlib_metadata.PackageNotFoundError:
-        module_version = getattr(module, "__version__", None)
-        return str(module_version) if module_version is not None else None
+        return None
 
 
 def _version_satisfies(installed_version: str, specifier: str) -> bool:
@@ -4687,7 +4690,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 flags map ``RUN_TO_RUN`` to ``DeterminismType.ALL`` before
                 model-constant initialization. This requests the backend's
                 available deterministic operations, not an end-to-end guarantee.
-                In MuJoCo Warp 4.0.0, contact and constraint sorting are still
+                MuJoCo Warp's contact and constraint sorting are still
                 unimplemented hooks; enabling their flags does not sort rows.
                 With Newton contacts, separately enable deterministic ordering on
                 :class:`newton.CollisionPipeline`. Neither setting guarantees
@@ -9926,6 +9929,10 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                     world_quat = qpos0_data.xquat[body] * (1.0, -1.0, -1.0, -1.0)
                     eq.data[0:11] = [0.0, 0.0, 0.0, *world_pos, *world_quat, 1.0]
                     eq.solref = spec.default.equality.solref
+                # MuJoCo 4.0 writes an infinite force range as "0 0", which does not load while limited.
+                for joint in spec.joints:
+                    if np.isinf(joint.actfrcrange).any():
+                        joint.actfrclimited = mujoco.mjtLimited.mjLIMITED_FALSE
                 with open(target_filename, "w") as f:
                     f.write(spec.to_xml())
                     logger.info("Saved mujoco model to %s", os.path.abspath(target_filename))
@@ -11334,7 +11341,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             if self._cpu is not None:
                 self._cpu.set_const()
             else:
-                self._mujoco_warp.set_const_0(self.mjw_model, self.mjw_data)
+                groups = self._mujoco_warp.SetConstGroup
+                self._mujoco_warp.set_const(self.mjw_model, self.mjw_data, groups=groups.KIN0 | groups.INERT0)
         invweight = self.mjw_model.dof_invweight0.numpy().copy()
         if locked:
             self._set_const_0()
