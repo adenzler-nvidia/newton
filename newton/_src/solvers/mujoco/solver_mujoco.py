@@ -5940,7 +5940,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
 
     @property
     def mj_data(self) -> MjData:
-        """MuJoCo data; the CPU backend shows its first world here."""
+        """MuJoCo data; the CPU backend shows its first world here, also after graph replays."""
         cpu = getattr(self, "_cpu", None)
         if cpu is not None:
             cpu.show_replayed()

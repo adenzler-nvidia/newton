@@ -1015,6 +1015,24 @@ example with ``mujoco.set_mjcb_control``. MuJoCo accepts a ``ctypes`` function
 that wraps a Python function instead; it holds the interpreter lock while it
 runs, which serializes the batch's threads.
 
+.. experimental::
+
+    With the model on the CPU device, steps of the CPU backend can be captured
+    in a Warp CPU graph, ``wp.ScopedCapture(device="cpu")``, and replayed with
+    :func:`warp.capture_launch`, which removes the Python overhead of a step.
+    This mode and its limitations may change without the normal deprecation
+    period, as may Warp's CPU graph capture.
+
+A captured step records its timestep and runs MuJoCo from the graph, on the
+batch's threads. Only plain steps can be captured: contact export,
+observables, masked updates, and
+:meth:`~newton.solvers.SolverMuJoCo.notify_model_changed` raise during a
+capture, because a replay could not repeat their host work. A failure of
+MuJoCo during a replay is raised by the next call to the solver, and
+``solver.mj_data`` is updated when it is next read. A graph keeps the native
+worlds alive, replays one at a time, and cannot be saved with
+``wp.capture_save()``.
+
 
 Runtime state synchronization
 -----------------------------
