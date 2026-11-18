@@ -15893,8 +15893,9 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
                 for _ in range(50):
                     step_twice()
             final.append(state_0.joint_q.numpy())
-            self.assertAlmostEqual(solver.mj_data.time, 50 * sum(timesteps), places=9)
+            # Both native handles show the replayed worlds, whichever is read first.
             self.assertEqual(solver.mj_model.opt.timestep, timesteps[1])
+            self.assertAlmostEqual(solver.mj_data.time, 50 * sum(timesteps), places=9)
         self.assertGreater(np.ptp(final[0].reshape(model.world_count, -1)[:, -1]), 1.0e-3)
         np.testing.assert_array_equal(final[1], final[0])
 

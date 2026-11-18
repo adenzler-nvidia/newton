@@ -1025,16 +1025,18 @@ runs, which serializes the batch's threads.
 
 A captured step records its timestep and runs MuJoCo from the graph, on the
 batch's threads. A replay could not repeat host work, so the following raise
-during a capture: steps that export contacts or request contact or body
-observables, updates of selected worlds, :meth:`~newton.solvers.SolverMuJoCo.reset`,
-and :meth:`~newton.solvers.SolverMuJoCo.notify_model_changed`. Generalized-force
-observables can be captured. Model changes made between replays take effect.
+during a capture: steps that export contacts or request contact, body, or
+friction-loss observables, updates of selected worlds,
+:meth:`~newton.solvers.SolverMuJoCo.reset`, and
+:meth:`~newton.solvers.SolverMuJoCo.notify_model_changed`. The ``QFRC_ACTUATOR``,
+``QFRC_BIAS``, and ``QFRC_CONSTRAINT`` observables can be captured. Model changes
+made between replays take effect.
 
 A failure of MuJoCo during a replay stops the graph from running MuJoCo, emits
 a :class:`~newton.NewtonWarning`, and is raised by the next call to the solver.
-``solver.mj_data`` is updated when it is next read. A graph keeps the native
-worlds alive, replays one at a time, and cannot be saved with
-``wp.capture_save()``.
+``solver.mj_model`` and ``solver.mj_data`` are updated when they are next read.
+A graph keeps the native worlds alive, replays one at a time, and cannot be
+saved with ``wp.capture_save()``.
 
 
 Runtime state synchronization

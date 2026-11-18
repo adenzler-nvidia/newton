@@ -5941,9 +5941,21 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
     # CPU backend copies the fields named here to its native worlds on the next flush.
 
     @property
+    def mj_model(self) -> MjModel:
+        """MuJoCo model; the CPU backend shows its first world here, also after graph replays."""
+        cpu = self._cpu
+        if cpu is not None:
+            cpu.show_replayed()
+        return self._mj_model
+
+    @mj_model.setter
+    def mj_model(self, value: MjModel) -> None:
+        self._mj_model = value
+
+    @property
     def mj_data(self) -> MjData:
         """MuJoCo data; the CPU backend shows its first world here, also after graph replays."""
-        cpu = getattr(self, "_cpu", None)
+        cpu = self._cpu
         if cpu is not None:
             cpu.show_replayed()
         return self._mj_data
