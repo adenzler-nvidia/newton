@@ -5943,7 +5943,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         """MuJoCo data; the CPU backend shows its first world here."""
         cpu = getattr(self, "_cpu", None)
         if cpu is not None:
-            cpu.show_replayed_data()
+            cpu.show_replayed()
         return self._mj_data
 
     @mj_data.setter

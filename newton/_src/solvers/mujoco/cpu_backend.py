@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import copy
 import ctypes
-import functools
-from collections.abc import Iterable, Sequence
+import weakref
+from collections.abc import Callable, Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -76,6 +76,7 @@ def _copy_from_native(native: wp.array2d[wp.float64], target: wp.array2d[float])
     target[world, i] = wp.float32(native[world, i])
 
 
+# Warp defines int(x) and float(x) as cast macros, so the snippet avoids a type followed by a parenthesis.
 @wp.func_native("""
 typedef void host_function_t(void);
 ((host_function_t*)function)();
@@ -84,12 +85,98 @@ def _call_host_function(function: wp.uint64): ...
 
 
 @wp.kernel(module="unique")
-def _call_host(function: wp.uint64):
-    """Call a host function, which lets a CPU graph replay work that is not a kernel."""
+def _call_host(function: wp.uint64, owner: wp.array[wp.float64]):
+    """Call a host function; ``owner`` is unused and makes a graph keep the function alive."""
     _call_host_function(function)
 
 
 _HOST_FUNCTION = ctypes.CFUNCTYPE(None)
+
+
+class _Replay:
+    """Records a step as kernel launches, so that a Warp CPU graph can replay it without the solver's Python.
+
+    Kernels copy the state between the MuJoCo Warp arrays and the batch, whose memory Warp arrays
+    alias, and a kernel calls back into Python to run the batch. Every array given to a kernel
+    holds this object, which a graph therefore keeps alive together with the batch.
+    """
+
+    def __init__(self, batch: Any, mjw_data: Any):
+        self._batch = batch
+        self._mjw_data = mjw_data
+        self.error: BaseException | None = None
+        """Exception of a replayed call, which cannot pass through the kernel that made it."""
+        self.ran = False
+        """Whether a graph has run the batch since the solver last looked."""
+        self._fields: dict[str, tuple[wp.array, wp.array] | None] = {}
+        self._owner = self._alias(np.zeros(1), wp.float64)
+        self.timestep = self._alias(batch.expand("opt.timestep"), wp.float64)
+        replay = weakref.ref(self)
+        self._calls = {}
+        for name, run in (("step", batch.step), ("forward", batch.forward)):
+
+            def call(run: Callable[[], None] = run) -> None:
+                self = replay()
+                if self is not None:
+                    self._run(run)
+
+            function = _HOST_FUNCTION(call)
+            self._calls[name] = (function, wp.uint64(ctypes.cast(function, ctypes.c_void_p).value))
+
+    def _alias(self, values: np.ndarray, dtype: Any, *owners: Any) -> wp.array:
+        """Return a Warp array over ``values`` that keeps this object and ``owners`` alive."""
+        keep = [self, values, *owners]
+        return wp.array(
+            ptr=values.__array_interface__["data"][0],
+            dtype=dtype,
+            shape=values.shape,
+            strides=values.strides,
+            device="cpu",
+            deleter=lambda ptr, size: keep.clear(),
+        )
+
+    def _run(self, run: Callable[[], None]) -> None:
+        self.ran = True
+        if self.error is None:
+            try:
+                run()
+            except BaseException as error:
+                self.error = error
+
+    def call(self, name: str) -> None:
+        """Record a run of the batch."""
+        wp.launch(_call_host, dim=1, inputs=[self._calls[name][1], self._owner], device="cpu")
+
+    def _field(self, name: str) -> tuple[wp.array, wp.array] | None:
+        """Return a data field's MuJoCo Warp and native values as arrays of ``[nworld, size]`` scalars."""
+        if name not in self._fields:
+            native = self._batch.bind(name)
+            native = native.reshape(native.shape[0], -1)
+            if native.size:
+                source = getattr(self._mjw_data, name)
+                dtype = wp.bool if source.dtype is wp.bool else wp.float32
+                staged = self._alias(source.numpy().reshape(native.shape), dtype, source)
+                self._fields[name] = (staged, self._alias(native, wp.float64))
+            else:
+                self._fields[name] = None
+        return self._fields[name]
+
+    def push(self, names: Iterable[str]) -> None:
+        """Record copies of MuJoCo Warp data fields to the native state."""
+        for name in names:
+            arrays = self._field(name)
+            if arrays is not None:
+                staged, native = arrays
+                kernel = _copy_flags_to_native if staged.dtype is wp.bool else _copy_to_native
+                wp.launch(kernel, dim=native.shape, inputs=[staged], outputs=[native], device="cpu")
+
+    def pull(self, names: Iterable[str]) -> None:
+        """Record copies of native data fields to the MuJoCo Warp data."""
+        for name in names:
+            arrays = self._field(name)
+            if arrays is not None:
+                staged, native = arrays
+                wp.launch(_copy_from_native, dim=native.shape, inputs=[native], outputs=[staged], device="cpu")
 
 
 class MuJoCoCPUBackend:
@@ -115,6 +202,7 @@ class MuJoCoCPUBackend:
         self._mjw_data = mjw_data
         self._host = _HostArrays()
         self._device = mjw_data.qpos.device
+        self._replay: _Replay | None = None
         self._model = mj_model
         # Persistent: one MjData per world, which contact and constraint export reads, and which fields
         # show as soon as they are bound; otherwise a field bound after a call is zero until the next one.
@@ -133,16 +221,6 @@ class MuJoCoCPUBackend:
         self._const_stale = np.zeros(nworld, dtype=bool)
         self._const_inputs = frozenset(getattr(mujoco.MjModel, "_setconst_inputs", ()))
         self._timestep: float | None = None
-        # On the CPU device, a step consists of kernel launches only, so that a Warp CPU graph can replay
-        # it: kernels copy the state, and a kernel calls back into Python to run the batch.
-        self._arrays: dict[str, tuple[wp.array, wp.array, Any]] = {}
-        self._host_calls: dict[str, tuple[Any, wp.uint64]] = {}
-        self._host_error: BaseException | None = None
-        self._data_outdated = False
-        if self._device.is_cpu:
-            for name, run in (("step", self.batch.step), ("forward", self.batch.forward)):
-                callback = _HOST_FUNCTION(functools.partial(self._run_from_kernel, run))
-                self._host_calls[name] = (callback, wp.uint64(ctypes.cast(callback, ctypes.c_void_p).value))
         # Newton only defines the size components that a geom's collision shape uses. MuJoCo compiles
         # the others for rendering, such as a plane's extent and grid spacing, or from mesh bounds.
         geom = mujoco.mjtGeom
@@ -168,66 +246,77 @@ class MuJoCoCPUBackend:
     # Execution
     # ------------------------------------------------------------------
 
+    def _recording(self, recordable: bool = True) -> _Replay | None:
+        """Return what records the current operation, if a graph is being captured.
+
+        Args:
+            recordable: Whether a graph can replay the operation; if not, capturing it raises.
+        """
+        if not self._device.is_capturing:
+            self._after_replay()
+            return None
+        if not recordable or not self._device.is_cpu:
+            raise RuntimeError(
+                "A graph can only replay plain steps of the MuJoCo CPU backend, with the model on the CPU device. "
+                "Capture steps without contact export, observables, masked updates, and model changes."
+            )
+        if self._replay is None:
+            self._replay = _Replay(self.batch, self._mjw_data)
+        return self._replay
+
+    def _after_replay(self) -> None:
+        """Raise the failure of a replayed step and show the first world as the replays left it."""
+        replay = self._replay
+        if replay is not None and (replay.ran or replay.error is not None):
+            replay.ran = False
+            error, replay.error = replay.error, None
+            # A replay may have used another timestep.
+            self._timestep = None
+            self._model_changed()
+            self.batch.get_data(0, self._data[0])
+            if error is not None:
+                raise error
+
+    def show_replayed(self) -> None:
+        """Update the solver's ``mj_model`` and ``mj_data`` after graph replays, which run without the solver."""
+        if not self._device.is_capturing:
+            self._after_replay()
+
     def set_timestep(self, dt: float) -> None:
-        if dt != self._timestep:
+        replay = self._recording()
+        if replay is not None:
+            replay.timestep.fill_(dt)
+        elif dt != self._timestep:
             self.option("timestep")[:] = dt
             self._timestep = dt
             self._model_changed()
 
     def step(self) -> None:
         """Advance every world by one timestep, continuing from a :meth:`forward` pass that was just run."""
-        self._run("step", self.batch.step)
+        replay = self._recording()
+        if replay is not None:
+            replay.call("step")
+            return
+        self.batch.step()
+        self.batch.get_data(0, self._data[0])
 
     def forward(self) -> None:
         """Run the forward dynamics of every world."""
-        self._run("forward", self.batch.forward)
-
-    def _run(self, name: str, run: Callable[[], None]) -> None:
-        if self._device.is_cpu:
-            wp.launch(_call_host, dim=1, inputs=[self._host_calls[name][1]], device="cpu")
-        else:
-            run()
-        self._changed()
-
-    def _run_from_kernel(self, run: Callable[[], None]) -> None:
-        # An exception cannot pass through the kernel that calls this; it is raised by the next call.
-        if self._host_error is None:
-            try:
-                run()
-            except BaseException as error:
-                self._host_error = error
-        self._data_outdated = True
-
-    def _host_only(self) -> None:
-        """Reject host work that a graph capture would run once, on values of before the captured steps."""
-        if self._device.is_capturing:
-            raise RuntimeError(
-                "This step uses MuJoCo CPU backend features that a Warp graph cannot replay: contact export, "
-                "observables, masked updates, and model changes. Capture steps without them."
-            )
-
-    def _changed(self) -> None:
-        """Report failures and show the first world, once the native worlds have changed."""
-        # While a graph is captured, nothing has run yet.
-        if not self._device.is_capturing:
-            self.show_data()
-
-    def show_data(self) -> None:
-        """Show the first world's data in the solver's ``mj_data``."""
-        if self._host_error is not None:
-            error, self._host_error = self._host_error, None
-            raise error
+        replay = self._recording()
+        if replay is not None:
+            replay.call("forward")
+            return
+        self.batch.forward()
         self.batch.get_data(0, self._data[0])
-        self._data_outdated = False
 
-    def show_replayed_data(self) -> None:
-        """Show the first world's data if a graph replay changed it since it was last shown."""
-        if self._data_outdated:
-            self.show_data()
+    def _show_first_state(self) -> None:
+        """Show the first world's state in the solver's ``mj_data``."""
+        integration = self._mujoco.mjtState.mjSTATE_INTEGRATION
+        self._mujoco.mj_setState(self._model, self._data[0], self.batch.state[0], integration)
 
     def set_const(self) -> None:
         """Recompute the model constants of the worlds whose model changed and read the ones Newton's kernels use."""
-        self._host_only()
+        self._recording(recordable=False)
         self.flush()
         if self._const_stale.any():
             self.batch.set_const(np.flatnonzero(self._const_stale))
@@ -242,14 +331,14 @@ class MuJoCoCPUBackend:
 
     def reset(self, worlds: Sequence[int] | None = None) -> None:
         """Clear the buffers that persist between steps in the selected worlds."""
-        self._host_only()
+        self._recording(recordable=False)
         for name in _RESET_FIELDS:
             self.batch.bind(name)[slice(None) if worlds is None else worlds] = 0.0
-        self.show_data()
+        self._show_first_state()
 
     def worlds(self) -> list[tuple[Any, Any]]:
         """Return a copy of every world's model and data, which the next change to the batch outdates."""
-        self._host_only()
+        self._recording(recordable=False)
         for _ in range(len(self._models), self.nworld):
             self._models.append(copy.copy(self._model))
             self._data.append(self._mujoco.MjData(self._model))
@@ -258,7 +347,7 @@ class MuJoCoCPUBackend:
             for world in range(1, self.nworld):
                 self.batch.get_model(world, self._models[world])
             self._models_stale = False
-        for world in range(self.nworld):
+        for world in range(1, self.nworld):
             self.batch.get_data(world, self._data[world])
         return list(zip(self._models, self._data, strict=True))
 
@@ -284,6 +373,7 @@ class MuJoCoCPUBackend:
 
     def mark_model(self, names: Iterable[str]) -> None:
         """Note MuJoCo Warp model fields that are about to be written."""
+        self._recording(recordable=False)
         for name in names:
             if name not in self._model_before:
                 self._model_before[name] = self._host.read(getattr(self._mjw_model, name)).copy()
@@ -324,55 +414,26 @@ class MuJoCoCPUBackend:
                 shared = target.size * wp.types.type_size(target.dtype) == native[0].size
                 self._host.write(target, native[0] if shared else native)
 
-    def _kernel_arrays(self, name: str) -> tuple[wp.array, wp.array, Any]:
-        """Return a data field's MuJoCo Warp and native values as arrays of ``[nworld, size]`` scalars."""
-        arrays = self._arrays.get(name)
-        if arrays is None:
-            native = self.batch.bind(name).reshape(self.nworld, -1)
-            source = getattr(self._mjw_data, name)
-            staged = wp.array(
-                ptr=source.ptr,
-                dtype=wp.bool if source.dtype is wp.bool else wp.float32,
-                shape=native.shape,
-                device="cpu",
-            )
-            aliased = wp.array(
-                ptr=native.__array_interface__["data"][0],
-                dtype=wp.float64,
-                shape=native.shape,
-                strides=native.strides,
-                device="cpu",
-            )
-            # The arrays alias memory of the MuJoCo Warp array and of the batch, which outlive them.
-            arrays = self._arrays[name] = (staged, aliased, (source, native))
-        return arrays
-
     def push_data(self, names: Iterable[str], worlds: Sequence[int] | None = None) -> None:
         """Copy MuJoCo Warp data fields to the native state of the selected worlds."""
-        if self._device.is_cpu and worlds is None:
-            for name in names:
-                staged, native, _ = self._kernel_arrays(name)
-                if native.size:
-                    kernel = _copy_flags_to_native if staged.dtype is wp.bool else _copy_to_native
-                    wp.launch(kernel, dim=native.shape, inputs=[staged], outputs=[native], device="cpu")
-            self._changed()
+        replay = self._recording(recordable=worlds is None)
+        if replay is not None:
+            replay.push(names)
             return
-        self._host_only()
         rows = slice(None) if worlds is None else worlds
         for name in names:
             native = self.batch.bind(name)
             if native.size:
                 native[rows] = self._host.read(getattr(self._mjw_data, name)).reshape(native.shape)[rows]
-        self.show_data()
+        self._show_first_state()
 
     def pull_data(self, names: Iterable[str]) -> None:
         """Copy native data fields of every world to the MuJoCo Warp data."""
+        replay = self._recording()
+        if replay is not None:
+            replay.pull(names)
+            return
         for name in names:
-            if self._device.is_cpu:
-                staged, native, _ = self._kernel_arrays(name)
-                if native.size:
-                    wp.launch(_copy_from_native, dim=native.shape, inputs=[native], outputs=[staged], device="cpu")
-                continue
             native = self.batch.bind(name)
             if native.size:
                 self._host.write(getattr(self._mjw_data, name), native)
@@ -387,6 +448,7 @@ class MuJoCoCPUBackend:
 
     def set_options(self, options: dict[str, np.ndarray]) -> None:
         """Set ``MjOption`` fields from one value per world, or a single value shared by all worlds."""
+        self._recording(recordable=False)
         for name, option in options.items():
             current = self.option(name)
             values = np.broadcast_to(option, current.shape)
@@ -471,7 +533,7 @@ class MuJoCoCPUBackend:
 
     def contact_count(self) -> int:
         """Return the number of contacts over all worlds."""
-        self._host_only()
+        self._recording(recordable=False)
         return int(self.batch.bind("ncon").sum())
 
     def contact_data(self, count: int, device: wp.Device) -> SimpleNamespace:

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
 import inspect
 import itertools
 import math
@@ -9,6 +10,7 @@ import tempfile
 import time
 import unittest
 import warnings
+import weakref
 import xml.etree.ElementTree as ET
 from copy import deepcopy
 from enum import IntFlag
@@ -15857,40 +15859,96 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
                 solver = SolverMuJoCo(model, use_mujoco_cpu=True, kinematic_switchable_roots=False)
                 np.testing.assert_array_equal(solver._cpu.model_field("eq_data")[..., 11], 0.0)
 
+    def _cpu_stepping(self, seed: int = 7):
+        """Return a randomized CPU-device model with its CPU-backend solver, states, and a position target."""
+        with wp.ScopedDevice("cpu"):
+            model = self._build_model()
+        self._randomize(model, seed=seed)
+        solver = SolverMuJoCo(model, use_mujoco_cpu=True)
+        state_0, state_1, control = model.state(), model.state(), model.control()
+        target = control.joint_target_q.numpy().reshape(model.world_count, -1)
+        target[:, -1] = 0.6
+        control.joint_target_q.assign(target.reshape(-1))
+        return model, solver, state_0, state_1, control
+
     def test_step_replays_from_cpu_graph(self):
-        """Replay captured steps, including the native MuJoCo call, with the result of stepping directly."""
+        """Replay captured steps, including the native MuJoCo call and their timesteps, as stepping directly does."""
+        timesteps = (0.002, 0.001)
         final = []
         for capture_steps in (False, True):
-            with wp.ScopedDevice("cpu"):
-                model = self._build_model()
-            self._randomize(model, seed=7)
-            solver = SolverMuJoCo(model, use_mujoco_cpu=True)
-            state_0, state_1, control = model.state(), model.state(), model.control()
-            target = control.joint_target_q.numpy().reshape(model.world_count, -1)
-            target[:, -1] = 0.6
-            control.joint_target_q.assign(target.reshape(-1))
+            model, solver, state_0, state_1, control = self._cpu_stepping()
+
+            def step_twice(solver=solver, state_0=state_0, state_1=state_1, control=control):
+                solver.step(state_0, state_1, control, None, timesteps[0])
+                solver.step(state_1, state_0, control, None, timesteps[1])
+
             if capture_steps:
                 with wp.ScopedCapture(device="cpu") as capture:
-                    solver.step(state_0, state_1, control, None, 0.002)
-                    solver.step(state_1, state_0, control, None, 0.002)
+                    step_twice()
                 # Capturing records the steps without running them.
+                self.assertEqual(solver.mj_data.time, 0.0)
                 for _ in range(50):
                     wp.capture_launch(capture.graph)
             else:
                 for _ in range(50):
-                    solver.step(state_0, state_1, control, None, 0.002)
-                    solver.step(state_1, state_0, control, None, 0.002)
+                    step_twice()
             final.append(state_0.joint_q.numpy())
-            self.assertAlmostEqual(solver.mj_data.time, 0.2, places=9)
+            self.assertAlmostEqual(solver.mj_data.time, 50 * sum(timesteps), places=9)
+            self.assertEqual(solver.mj_model.opt.timestep, timesteps[1])
         self.assertGreater(np.ptp(final[0].reshape(model.world_count, -1)[:, -1]), 1.0e-3)
         np.testing.assert_array_equal(final[1], final[0])
 
-        # Host work that a replay would skip cannot be captured.
+        # Stepping directly continues from the replayed state.
+        solver.step(state_0, state_1, control, None, 0.004)
+        self.assertAlmostEqual(solver.mj_data.time, 50 * sum(timesteps) + 0.004, places=9)
+
+    def test_cpu_graph_outlives_solver(self):
+        """Replay a graph after its solver is gone; the graph keeps the native worlds alive."""
+        _, solver, state_0, state_1, control = self._cpu_stepping()
+        with wp.ScopedCapture(device="cpu") as capture:
+            solver.step(state_0, state_1, control, None, 0.002)
+            solver.step(state_1, state_0, control, None, 0.002)
+        batch = weakref.ref(solver._cpu.batch)
+        initial = state_0.joint_q.numpy().copy()
+        del solver
+        gc.collect()
+        self.assertIsNotNone(batch())
+        for _ in range(20):
+            wp.capture_launch(capture.graph)
+        self.assertGreater(np.abs(state_0.joint_q.numpy() - initial).max(), 1.0e-4)
+        del capture
+        gc.collect()
+        self.assertIsNone(batch())
+
+    def test_cpu_graph_reports_failures_and_rejects_host_work(self):
+        """Raise a replayed step's failure at the next solver call, and reject captures a replay could not repeat."""
+        model, solver, state_0, state_1, control = self._cpu_stepping()
+        step, failing = solver._cpu.batch.step, [False]
+
+        def step_or_fail():
+            if failing[0]:
+                raise ValueError("native step failed")
+            step()
+
+        solver._cpu.batch.step = step_or_fail
+        with wp.ScopedCapture(device="cpu") as capture:
+            solver.step(state_0, state_1, control, None, 0.002)
+        failing[0] = True
+        wp.capture_launch(capture.graph)
+        failing[0] = False
+        with self.assertRaisesRegex(ValueError, "native step failed"):
+            solver.step(state_0, state_1, control, None, 0.002)
+        # The failure is reported once.
+        solver.step(state_0, state_1, control, None, 0.002)
+
         contacts = newton.Contacts(solver.get_max_contact_count(), 0, device=model.device)
         observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
-        with self.assertRaisesRegex(RuntimeError, "graph cannot replay"):
+        with self.assertRaisesRegex(RuntimeError, "only replay plain steps"):
             with wp.ScopedCapture(device="cpu"):
                 solver.step(state_0, state_1, control, contacts, 0.002, observables=observables)
+        with self.assertRaisesRegex(RuntimeError, "only replay plain steps"):
+            with wp.ScopedCapture(device="cpu"):
+                solver.notify_model_changed(ModelFlags.BODY_INERTIAL_PROPERTIES)
 
     def test_kinematic_root_in_one_world(self):
         """Hold a root kinematic in one world while the same root falls in the others."""
