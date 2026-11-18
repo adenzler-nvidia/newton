@@ -123,6 +123,8 @@ class _Replay:
         """Exception of a replayed call, which cannot pass through the kernel that made it."""
         self.ran = False
         """Whether a graph has run the batch since the solver last looked."""
+        self.running = False
+        """Whether a graph is running the batch, which then cannot be read."""
         self._fields: dict[tuple[bool, str], tuple[wp.array, wp.array] | None] = {}
         self._owner = self._alias(np.zeros(1), wp.float64)
         self.timestep = self._alias(batch.expand("opt.timestep"), wp.float64)
@@ -151,7 +153,14 @@ class _Replay:
         )
 
     def _run(self, run: Callable[[], None]) -> None:
-        self.ran = True
+        self.running = True
+        try:
+            self._run_batch(run)
+        finally:
+            self.running = False
+            self.ran = True
+
+    def _run_batch(self, run: Callable[[], None]) -> None:
         if self.error is None:
             try:
                 run()
@@ -311,7 +320,8 @@ class MuJoCoCPUBackend:
     def _after_replay(self) -> None:
         """Raise the failure of a replayed step and show the first world as the replays left it."""
         replay = self._replay
-        if replay is not None and (replay.ran or replay.error is not None):
+        # A MuJoCo callback may read the solver's native handles while a replay runs the batch.
+        if replay is not None and not replay.running and (replay.ran or replay.error is not None):
             replay.ran = False
             error, replay.error = replay.error, None
             # A replay may have used another timestep, and may have copied model fields.

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import ctypes
 import gc
 import inspect
 import itertools
@@ -15902,6 +15903,27 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         # Stepping directly continues from the replayed state.
         solver.step(state_0, state_1, control, None, 0.004)
         self.assertAlmostEqual(solver.mj_data.time, 50 * sum(timesteps) + 0.004, places=9)
+
+    def test_cpu_graph_allows_mujoco_callback_to_read_native_handles(self):
+        """Let a MuJoCo callback read the solver's native handles while a replay runs the batch."""
+        _, solver, state_0, state_1, control = self._cpu_stepping()
+        mujoco = solver._mujoco
+        with wp.ScopedCapture(device="cpu") as capture:
+            solver.step(state_0, state_1, control, None, 0.002)
+        wp.capture_launch(capture.graph)
+        seen = []
+
+        def read_handles(model, data):
+            seen.append((solver.mj_model.opt.timestep, solver.mj_data.time))
+
+        callback = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(read_handles)
+        mujoco.set_mjcb_control(callback)
+        try:
+            wp.capture_launch(capture.graph)
+        finally:
+            mujoco.set_mjcb_control(None)
+        self.assertGreaterEqual(len(seen), self.WORLD_COUNT)
+        self.assertAlmostEqual(solver.mj_data.time, 0.004, places=9)
 
     def test_cpu_graph_outlives_solver(self):
         """Replay a graph after its solver is gone; the graph keeps the native worlds alive."""
