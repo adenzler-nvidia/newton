@@ -16386,8 +16386,9 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         for candidate in (solver, fresh):
             candidate.step(state_0, state_1, None, None, 0.002)
         lowered = {0: int(np.flatnonzero(geoms[0] == box)[0]), 1: int(np.flatnonzero(geoms[1] == sphere)[0])}
-        for world in range(self.WORLD_COUNT):
-            data, fresh_data = solver._cpu.worlds()[world][1], fresh._cpu.worlds()[world][1]
+        for world, ((_, data), (_, fresh_data)) in enumerate(
+            zip(solver._cpu.worlds(), fresh._cpu.worlds(), strict=True)
+        ):
             pairs = [sorted(map(tuple, d.contact.geom[: d.ncon].tolist())) for d in (data, fresh_data)]
             self.assertEqual(pairs[0], pairs[1])
             # Only the lowered shape of a world reaches the ground.

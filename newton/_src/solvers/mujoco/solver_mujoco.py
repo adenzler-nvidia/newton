@@ -6221,11 +6221,13 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         nworld = mj_data.nworld
         joints_per_world = model.joint_count // nworld
         apply_particle_f = state.particle_f is not None and self._particle_qvel_adr.shape[0] > 0
-        if self._cpu is not None and control is None:
+        if self._cpu is not None:
             # Native MuJoCo applies only the inputs of this call; MuJoCo Warp keeps the ones it is not given.
-            if apply_control:
+            if apply_control and control is None:
                 ctrl.zero_()
-            if apply_control or apply_particle_f:
+            # The joint-force kernel does not write the particle DOFs.
+            particles = self._particle_qvel_adr.shape[0] > 0
+            if (apply_control or apply_particle_f) and (control is None or particles):
                 qfrc.zero_()
         if control is not None:
             # Use instance arrays (built during MuJoCo model construction)

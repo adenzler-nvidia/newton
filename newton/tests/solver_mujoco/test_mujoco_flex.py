@@ -179,6 +179,30 @@ class TestMuJoCoFlex(unittest.TestCase):
             state_1.particle_qd.numpy(), [[0.0, 0.0, 0.0]] * 2 + [[0.0, 0.0, dt / 0.01]], atol=1.0e-6
         )
 
+    def test_particle_forces_stop_with_their_state_on_cpu_backend(self):
+        """Stop applying a particle force once the state no longer carries one."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        # A rigid body gives the control joint forces, whose kernel does not write the particle DOFs.
+        builder.add_body(
+            mass=1.0, inertia=wp.mat33(np.eye(3) * 0.01), xform=wp.transform((0.0, 2.0, 0.0), wp.quat_identity())
+        )
+        _add_rope(builder, 0.0)
+        model = builder.finalize()
+        solver = SolverMuJoCo(model, use_mujoco_cpu=True)
+
+        state_0, state_1 = model.state(), model.state()
+        state_0.particle_f.assign(np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32))
+        dt = 1.0e-3
+        control = model.control()
+        solver.step(state_0, state_1, control, None, dt)
+        pushed = state_1.particle_qd.numpy().copy()
+        self.assertAlmostEqual(float(pushed[2, 2]), dt / 0.01, places=6)
+        state_1.particle_f = None
+        solver.step(state_1, state_0, control, None, dt)
+        self.assertAlmostEqual(
+            float(state_0.particle_qd.numpy().sum(axis=0)[2]), float(pushed.sum(axis=0)[2]), places=6
+        )
+
     def test_authored_flexes_keep_settings_in_each_world(self):
         """Authored flexes keep their settings per world, and the remaining elements are grouped automatically."""
         world = _builder()

@@ -10,7 +10,7 @@ import copy
 import ctypes
 import warnings
 import weakref
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -254,10 +254,9 @@ class MuJoCoCPUBackend:
         # show as soon as they are bound; otherwise a field bound after a call is zero until the next one.
         self.batch = batch.Batch(mj_model, nworld, nthread, persistent=True)
         """The simulations; state fields are bound and model fields expanded per world."""
-        # Copies of each world's model and data for MuJoCo functions the batch does not run; the first are the solver's.
-        self._models = [mj_model]
-        self._data = [mj_data]
-        self._models_stale = False
+        self._data = mj_data
+        # A copy of one world's model and data at a time, for MuJoCo functions the batch does not run.
+        self._scratch_model: Any = None
         state = np.empty(self.batch.nstate)
         mujoco.mj_getState(mj_model, mj_data, state, mujoco.mjtState.mjSTATE_INTEGRATION)
         self.batch.state[:] = state
@@ -329,7 +328,7 @@ class MuJoCoCPUBackend:
             if replay.pushed_model:
                 self._const_stale[:] = True
             self._model_changed()
-            self.batch.get_data(0, self._data[0])
+            self.batch.get_data(0, self._data)
             if error is not None:
                 raise error
 
@@ -358,7 +357,7 @@ class MuJoCoCPUBackend:
             replay.call("step")
             return
         self.batch.step()
-        self.batch.get_data(0, self._data[0])
+        self.batch.get_data(0, self._data)
 
     def forward(self) -> None:
         """Run the forward dynamics of every world."""
@@ -367,12 +366,12 @@ class MuJoCoCPUBackend:
             replay.call("forward")
             return
         self.batch.forward()
-        self.batch.get_data(0, self._data[0])
+        self.batch.get_data(0, self._data)
 
     def _show_first_state(self) -> None:
         """Show the first world's state in the solver's ``mj_data``."""
         integration = self._mujoco.mjtState.mjSTATE_INTEGRATION
-        self._mujoco.mj_setState(self._model, self._data[0], self.batch.state[0], integration)
+        self._mujoco.mj_setState(self._model, self._data, self.batch.state[0], integration)
 
     def set_const(self) -> None:
         """Recompute the model constants of the worlds whose model changed and read the ones Newton's kernels use."""
@@ -396,25 +395,25 @@ class MuJoCoCPUBackend:
             self.batch.bind(name)[slice(None) if worlds is None else worlds] = 0.0
         self._show_first_state()
 
-    def worlds(self) -> list[tuple[Any, Any]]:
-        """Return a copy of every world's model and data, which the next change to the batch outdates."""
+    def worlds(self, models: bool = True) -> Iterator[tuple[Any, Any]]:
+        """Yield a copy of every world's model and data in turn; the next world overwrites both.
+
+        Args:
+            models: Whether the models are needed; otherwise ``None`` is yielded in their place.
+        """
         self._recording(recordable=False)
-        for _ in range(len(self._models), self.nworld):
-            self._models.append(copy.copy(self._model))
-            self._data.append(self._mujoco.MjData(self._model))
-            self._models_stale = True
-        if self._models_stale:
-            for world in range(1, self.nworld):
-                self.batch.get_model(world, self._models[world])
-            self._models_stale = False
-        for world in range(1, self.nworld):
-            self.batch.get_data(world, self._data[world])
-        return list(zip(self._models, self._data, strict=True))
+        if models and self._scratch_model is None:
+            self._scratch_model = copy.copy(self._model)
+        data = self._scratch_data()
+        for world in range(self.nworld):
+            if models:
+                self.batch.get_model(world, self._scratch_model)
+            self.batch.get_data(world, data)
+            yield (self._scratch_model if models else None), data
 
     def _model_changed(self) -> None:
         """Show the first world's model in the solver's ``mj_model``."""
         self.batch.get_model(0, self._model)
-        self._models_stale = True
 
     # ------------------------------------------------------------------
     # Mirroring
@@ -503,11 +502,14 @@ class MuJoCoCPUBackend:
 
     def pull_rne_postconstraint(self) -> None:
         """Compute the body accelerations and interaction forces, which MuJoCo skips without sensors that use them."""
-        worlds = self.worlds()
-        for model, data in worlds:
+        names = ("cacc", "cfrc_int")
+        values = [np.empty((self.nworld, self._model.nbody, 6)) for _ in names]
+        for world, (model, data) in enumerate(self.worlds()):
             self._mujoco.mj_rnePostConstraint(model, data)
-        for name in ("cacc", "cfrc_int"):
-            self._host.write(getattr(self._mjw_data, name), np.stack([getattr(data, name) for _, data in worlds]))
+            for name, value in zip(names, values, strict=True):
+                value[world] = getattr(data, name)
+        for name, value in zip(names, values, strict=True):
+            self._host.write(getattr(self._mjw_data, name), value)
 
     def set_options(self, options: dict[str, np.ndarray]) -> None:
         """Set ``MjOption`` fields from one value per world, or a single value shared by all worlds."""
@@ -556,14 +558,13 @@ class MuJoCoCPUBackend:
         if not np.any(dampratio[:, list(actuators)] > 0.0):
             return
         self.flush()
-        d = self._scratch_data()
         biasprm = self.model_field("actuator_biasprm")
-        for world, ((m, _), ratio) in enumerate(zip(self.worlds(), dampratio, strict=True)):
+        for world, ((m, d), ratio) in enumerate(zip(self.worlds(), dampratio, strict=True)):
             selected = [a for a in actuators if ratio[a] > 0.0]
             if not selected:
                 continue
-            # The reference configuration of this world, including its mocap poses.
-            mujoco.mj_resetData(m, d)
+            # The reference configuration, with the world's current mocap poses of fixed roots.
+            d.qpos[:] = m.qpos0
             mujoco.mj_kinematics(m, d)
             mujoco.mj_comPos(m, d)
             mujoco.mj_tendon(m, d)
@@ -593,7 +594,7 @@ class MuJoCoCPUBackend:
         """Return the DOF friction-loss constraint forces of every world, shape ``[nworld, nv]``."""
         friction_dof = self._mujoco.mjtConstraint.mjCNSTR_FRICTION_DOF
         force = np.zeros((self.nworld, self._model.nv), dtype=np.float32)
-        for world, (_, data) in enumerate(self.worlds()):
+        for world, (_, data) in enumerate(self.worlds(models=False)):
             rows = data.efc_type == friction_dof
             force[world, data.efc_id[rows]] = data.efc_force[rows]
         return force
@@ -609,8 +610,7 @@ class MuJoCoCPUBackend:
         The result has the ``nacon``, ``naconmax``, ``njmax``, ``contact``, and ``efc.force``
         members that contact export reads from MuJoCo Warp's data.
         """
-        worlds = self.worlds()
-        nefc = max(data.nefc for _, data in worlds)
+        nefc = int(self.batch.bind("nefc").max())
         pos = np.empty((count, 3), dtype=np.float32)
         frame = np.empty((count, 3, 3), dtype=np.float32)
         friction = np.empty((count, 5), dtype=np.float32)
@@ -622,7 +622,7 @@ class MuJoCoCPUBackend:
         worldid = np.empty(count, dtype=np.int32)
         efc_force = np.zeros((self.nworld, max(nefc, 1)), dtype=np.float32)
         start = 0
-        for world, (_, data) in enumerate(worlds):
+        for world, (_, data) in enumerate(self.worlds(models=False)):
             efc_force[world, : data.nefc] = data.efc_force
             n = min(data.ncon, count - start)
             if n <= 0:
