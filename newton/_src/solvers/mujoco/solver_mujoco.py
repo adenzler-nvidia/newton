@@ -5711,6 +5711,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
         if self.use_mujoco_cpu:
+            if self._cpu is not None:
+                self._cpu.host_only()
             self._notify_model_changed(flags)
         else:
             with self._scoped_mujoco_warp_execution():
@@ -10050,8 +10052,9 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         """Re-center active kinematic welds on their roots' current MuJoCo pose before a step."""
         if self._kinematic_weld_eq is None:
             return
-        if self._cpu is not None and self._kinematic_roots_dynamic:
-            # No weld is active; skip copying eq_data to every native world on each step.
+        if self._cpu is not None and self._kinematic_roots_dynamic and not self.model.device.is_capturing:
+            # No weld is active; skip copying eq_data to every native world on each step. A captured
+            # graph keeps the update, because a root may become kinematic before it is replayed.
             return
         m, d = self.mjw_model, self.mjw_data
         wp.launch(

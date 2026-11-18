@@ -15968,6 +15968,35 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         self.assertLess(float(height[0]), 0.08)
         self.assertLess(float(height[2]), 0.08)
 
+    def test_cpu_graph_follows_kinematic_root_switch(self):
+        """Hold a root that became kinematic after the capture, as stepping directly does."""
+        final = []
+        for capture_steps in (False, True):
+            with wp.ScopedDevice("cpu"):
+                model = self._build_model()
+            bodies_per_world = model.body_count // self.WORLD_COUNT
+            solver = SolverMuJoCo(model, use_mujoco_cpu=True, disable_contacts=True)
+            state_0, state_1 = model.state(), model.state()
+            if capture_steps:
+                with wp.ScopedCapture(device="cpu") as capture:
+                    solver.step(state_0, state_1, None, None, 0.002)
+                    solver.step(state_1, state_0, None, None, 0.002)
+            flags = model.body_flags.numpy()
+            flags[bodies_per_world] |= int(newton.BodyFlags.KINEMATIC)
+            model.body_flags.assign(flags)
+            solver.notify_model_changed(ModelFlags.BODY_PROPERTIES)
+            for _ in range(25):
+                if capture_steps:
+                    wp.capture_launch(capture.graph)
+                else:
+                    solver.step(state_0, state_1, None, None, 0.002)
+                    solver.step(state_1, state_0, None, None, 0.002)
+            final.append(state_0.body_q.numpy())
+        height = final[1].reshape(self.WORLD_COUNT, bodies_per_world, 7)[:, 0, 2]
+        self.assertAlmostEqual(float(height[1]), 0.12, places=5)
+        self.assertLess(float(height[0]), 0.08)
+        np.testing.assert_array_equal(final[1], final[0])
+
     def test_shape_updates_reach_native_collision(self):
         """Collide with the shapes that one world moves or resizes at runtime.
 

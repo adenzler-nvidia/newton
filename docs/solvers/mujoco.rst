@@ -1024,11 +1024,14 @@ runs, which serializes the batch's threads.
     period, as may Warp's CPU graph capture.
 
 A captured step records its timestep and runs MuJoCo from the graph, on the
-batch's threads. Only plain steps can be captured: contact export,
-observables, masked updates, and
-:meth:`~newton.solvers.SolverMuJoCo.notify_model_changed` raise during a
-capture, because a replay could not repeat their host work. A failure of
-MuJoCo during a replay is raised by the next call to the solver, and
+batch's threads. A replay could not repeat host work, so the following raise
+during a capture: steps that export contacts or request contact or body
+observables, updates of selected worlds, :meth:`~newton.solvers.SolverMuJoCo.reset`,
+and :meth:`~newton.solvers.SolverMuJoCo.notify_model_changed`. Generalized-force
+observables can be captured. Model changes made between replays take effect.
+
+A failure of MuJoCo during a replay stops the graph from running MuJoCo, emits
+a :class:`~newton.NewtonWarning`, and is raised by the next call to the solver.
 ``solver.mj_data`` is updated when it is next read. A graph keeps the native
 worlds alive, replays one at a time, and cannot be saved with
 ``wp.capture_save()``.
