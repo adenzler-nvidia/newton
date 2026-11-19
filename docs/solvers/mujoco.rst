@@ -1160,6 +1160,12 @@ example with ``mujoco.set_mjcb_control``. MuJoCo accepts a ``ctypes`` function
 that wraps a Python function instead; it holds the interpreter lock while it
 runs, which serializes the batch's threads.
 
+Native MuJoCo computes in double precision, but Newton's :class:`~newton.State`
+is single precision. Each step replaces MuJoCo's coordinates and velocities
+with the input state and reads the result back, so trajectories have
+single-precision resolution at step boundaries. ``solver.mj_data`` shows the
+first world in double precision.
+
 .. experimental::
 
     With the model on the CPU device, steps of the CPU backend can be captured
