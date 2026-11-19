@@ -1183,8 +1183,7 @@ friction-loss observables, updates of selected worlds,
 ``QFRC_BIAS``, and ``QFRC_CONSTRAINT`` observables can be captured. Model changes
 made between replays take effect.
 
-A failure of MuJoCo during a replay stops the graph from running MuJoCo, emits
-a :class:`~newton.NewtonWarning`, and is raised by the next call to the solver.
+A failure of MuJoCo during a replay is raised by :func:`warp.capture_launch`.
 ``solver.mj_model`` and ``solver.mj_data`` are updated when they are next read.
 A graph keeps the native worlds alive, replays one at a time, and cannot be
 saved with ``wp.capture_save()``.

@@ -16274,7 +16274,7 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         self.assertIsNone(batch())
 
     def test_cpu_graph_reports_failures_and_rejects_host_work(self):
-        """Raise a replayed step's failure at the next solver call, and reject captures a replay could not repeat."""
+        """Raise a replayed step's failure from the launch, and reject captures a replay could not repeat."""
         model, solver, state_0, state_1, control = self._cpu_stepping()
         step, failing = solver._cpu.batch.step, [False]
 
@@ -16287,12 +16287,11 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         with wp.ScopedCapture(device="cpu") as capture:
             solver.step(state_0, state_1, control, None, 0.002)
         failing[0] = True
-        with self.assertWarnsRegex(newton.NewtonWarning, "native step failed"):
+        with self.assertRaisesRegex(ValueError, "native step failed"):
             wp.capture_launch(capture.graph)
         failing[0] = False
-        with self.assertRaisesRegex(ValueError, "native step failed"):
-            solver.step(state_0, state_1, control, None, 0.002)
         # The failure is reported once.
+        wp.capture_launch(capture.graph)
         solver.step(state_0, state_1, control, None, 0.002)
 
         contacts = newton.Contacts(solver.get_max_contact_count(), 0, device=model.device)
@@ -16304,9 +16303,11 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
             with wp.ScopedCapture(device="cpu"):
                 solver.notify_model_changed(ModelFlags.BODY_INERTIAL_PROPERTIES)
         # A saved graph would call a function of this process from another one.
-        with self.assertRaisesRegex(RuntimeError, "cannot be saved"):
-            with wp.ScopedCapture(device="cpu", apic=True):
-                solver.step(state_0, state_1, control, None, 0.002)
+        with wp.ScopedCapture(device="cpu", apic=True) as capture:
+            solver.step(state_0, state_1, control, None, 0.002)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "capture_callback"):
+                wp.capture_save(capture.graph, os.path.join(directory, "step"))
 
     def test_omitted_targets_stop_driving(self):
         """Clear the native controls of targets that the control no longer carries."""

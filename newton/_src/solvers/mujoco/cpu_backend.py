@@ -5,12 +5,9 @@
 
 from __future__ import annotations
 
-import contextlib
 import copy
-import ctypes
-import warnings
-import weakref
-from collections.abc import Callable, Iterable, Iterator, Sequence
+import functools
+from collections.abc import Iterable, Iterator, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,7 +15,6 @@ import numpy as np
 import warp as wp
 
 from ...core.types import vec5
-from ...exceptions import NewtonWarning
 from .constants import MJ_MINVAL
 
 # Derived MjModel constants that mj_setConst recomputes and Newton's kernels read back.
@@ -88,28 +84,11 @@ def _copy_from_native(native: wp.array2d[wp.float64], target: wp.array2d[float])
     target[world, i] = wp.float32(native[world, i])
 
 
-# Warp defines int(x) and float(x) as cast macros, so the snippet avoids a type followed by a parenthesis.
-@wp.func_native("""
-typedef void host_function_t(void);
-((host_function_t*)function)();
-""")
-def _call_host_function(function: wp.uint64): ...
-
-
-@wp.kernel(module="unique")
-def _call_host(function: wp.uint64, owner: wp.array[wp.float64]):
-    """Call a host function; ``owner`` is unused and makes a graph keep the function alive."""
-    _call_host_function(function)
-
-
-_HOST_FUNCTION = ctypes.CFUNCTYPE(None)
-
-
 class _Replay:
     """Records a step as kernel launches, so that a Warp CPU graph can replay it without the solver's Python.
 
     Kernels copy the state between the MuJoCo Warp arrays and the batch, whose memory Warp arrays
-    alias, and a kernel calls back into Python to run the batch. Every array given to a kernel
+    alias, and :func:`warp.capture_callback` runs the batch. Every array given to a kernel
     holds this object, which a graph therefore keeps alive together with the batch.
     """
 
@@ -119,26 +98,12 @@ class _Replay:
         self._mjw_data = mjw_data
         self.pushed_model = False
         """Whether a recorded step copies model fields, which a replay does without the solver's bookkeeping."""
-        self.error: BaseException | None = None
-        """Exception of a replayed call, which cannot pass through the kernel that made it."""
         self.ran = False
         """Whether a graph has run the batch since the solver last looked."""
         self.running = False
         """Whether a graph is running the batch, which then cannot be read."""
         self._fields: dict[tuple[bool, str], tuple[wp.array, wp.array] | None] = {}
-        self._owner = self._alias(np.zeros(1), wp.float64)
         self.timestep = self._alias(batch.expand("opt.timestep"), wp.float64)
-        replay = weakref.ref(self)
-        self._calls = {}
-        for name, run in (("step", batch.step), ("forward", batch.forward)):
-
-            def call(run: Callable[[], None] = run) -> None:
-                self = replay()
-                if self is not None:
-                    self._run(run)
-
-            function = _HOST_FUNCTION(call)
-            self._calls[name] = (function, wp.uint64(ctypes.cast(function, ctypes.c_void_p).value))
 
     def _alias(self, values: np.ndarray, dtype: Any, *owners: Any) -> wp.array:
         """Return a Warp array over ``values`` that keeps this object and ``owners`` alive."""
@@ -152,32 +117,17 @@ class _Replay:
             deleter=lambda ptr, size: keep.clear(),
         )
 
-    def _run(self, run: Callable[[], None]) -> None:
+    def _run(self, name: str) -> None:
         self.running = True
         try:
-            self._run_batch(run)
+            getattr(self._batch, name)()
         finally:
             self.running = False
             self.ran = True
 
-    def _run_batch(self, run: Callable[[], None]) -> None:
-        if self.error is None:
-            try:
-                run()
-            except BaseException as error:
-                self.error = error
-                # The graph may have outlived the solver that raises this. An exception cannot
-                # leave this function, also not one that a warning filter makes of the warning.
-                with contextlib.suppress(Warning):
-                    warnings.warn(
-                        f"MuJoCo failed during a graph replay, which stops running it: {error}",
-                        NewtonWarning,
-                        stacklevel=1,
-                    )
-
     def call(self, name: str) -> None:
         """Record a run of the batch."""
-        wp.launch(_call_host, dim=1, inputs=[self._calls[name][1], self._owner], device="cpu")
+        wp.capture_callback(functools.partial(self._run, name), device="cpu")
 
     def _field(self, name: str, model: bool = False) -> tuple[wp.array, wp.array] | None:
         """Return a field's MuJoCo Warp and native values as arrays of ``[nworld, size]`` scalars."""
@@ -306,31 +256,22 @@ class MuJoCoCPUBackend:
                 "A graph can only replay plain steps of the MuJoCo CPU backend, with the model on the CPU device. "
                 "Capture steps without contact export, observables, masked updates, and model changes."
             )
-        # Warp has no public way to ask whether the capture can be saved.
-        if getattr(getattr(wp._src.context.runtime, "_apic_capture", None), "apic_savable", False):
-            raise RuntimeError(
-                "A graph of MuJoCo CPU backend steps cannot be saved, because it records a function of this "
-                "process. Capture it without apic=True."
-            )
         if self._replay is None:
             self._replay = _Replay(self.batch, self._mjw_model, self._mjw_data)
         return self._replay
 
     def _after_replay(self) -> None:
-        """Raise the failure of a replayed step and show the first world as the replays left it."""
+        """Show the first world as the replays left it."""
         replay = self._replay
         # A MuJoCo callback may read the solver's native handles while a replay runs the batch.
-        if replay is not None and not replay.running and (replay.ran or replay.error is not None):
+        if replay is not None and not replay.running and replay.ran:
             replay.ran = False
-            error, replay.error = replay.error, None
             # A replay may have used another timestep, and may have copied model fields.
             self._timestep = None
             if replay.pushed_model:
                 self._const_stale[:] = True
             self._model_changed()
             self.batch.get_data(0, self._data)
-            if error is not None:
-                raise error
 
     def host_only(self) -> None:
         """Reject a graph capture of host work that a replay could not repeat."""
