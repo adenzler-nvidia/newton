@@ -1464,7 +1464,7 @@ class TestMenagerieUSD(TestMenagerieBase):
                 q /= np.linalg.norm(q)
 
         state.joint_q.assign(joint_q_np)
-        solver._update_mjc_data(solver.mjw_data, model, state)
+        solver._update_mjc_data(model, state)
 
         # Remap Newton-layout qpos into native-layout before copying.
         newton_qpos = solver.mjw_data.qpos.numpy()

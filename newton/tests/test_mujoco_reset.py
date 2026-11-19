@@ -105,26 +105,18 @@ class TestMuJoCoReset(unittest.TestCase):
         for name, buf in self._cleared_buffers().items():
             self.assertTrue(np.all(buf.numpy() == 7.0), f"{name} changed by a rejected mask")
 
-    def test_native_cpu_reset_honors_template_world_mask(self):
-        """Reset native MuJoCo buffers only when local world 0 is selected."""
+    def test_native_cpu_reset_honors_world_mask(self):
+        """Reset the native MuJoCo buffers of exactly the selected worlds."""
         self.model = _build_two_world_model(world_count=2)
-        solver = SolverMuJoCo(self.model, separate_worlds=True, use_mujoco_cpu=True)
-        data = solver.mj_data
-        buffers = tuple(
-            buffer
-            for buffer in (
-                data.qacc_warmstart,
-                data.qfrc_applied,
-                data.ctrl,
-                data.act,
-                data.xfrc_applied,
-            )
-            if buffer.size > 0
-        )
-        for mask_values, expected in (
-            ((False, False, True), 7.0),
-            ((False, True, False), 7.0),
-            ((True, False, False), 0.0),
+        solver = SolverMuJoCo(self.model, use_mujoco_cpu=True)
+        names = ("qacc_warmstart", "qfrc_applied", "ctrl", "act", "xfrc_applied")
+        buffers = [buffer for buffer in map(solver._cpu.batch.bind, names) if buffer.size > 0]
+        self.assertEqual(buffers[0].shape[0], 2)
+        for mask_values in (
+            (False, False, True),
+            (False, True, False),
+            (True, False, False),
+            (True, True, False),
         ):
             with self.subTest(mask=mask_values):
                 for buffer in buffers:
@@ -135,19 +127,20 @@ class TestMuJoCoReset(unittest.TestCase):
                     flags=0,
                 )
                 for buffer in buffers:
-                    np.testing.assert_array_equal(buffer, expected)
+                    for world in range(2):
+                        np.testing.assert_array_equal(buffer[world], 0.0 if mask_values[world] else 7.0)
+                # The solver's native data shows the first world.
+                np.testing.assert_array_equal(solver.mj_data.qacc_warmstart, 0.0 if mask_values[0] else 7.0)
 
-    def test_native_cpu_masked_joint_reset_preserves_template_state(self):
-        """Preserve native MuJoCo coordinates when local world 0 is unselected."""
+    def test_native_cpu_masked_joint_reset_preserves_unselected_worlds(self):
+        """Preserve native MuJoCo coordinates in unselected worlds and push the defaults to selected ones."""
         self.model = _build_two_world_model(world_count=2)
         # TODO: remove with update_data_interval.
         with self.assertWarns(NewtonDeprecationWarning):
-            solver = SolverMuJoCo(
-                self.model,
-                separate_worlds=True,
-                use_mujoco_cpu=True,
-                update_data_interval=0,
-            )
+            solver = SolverMuJoCo(self.model, use_mujoco_cpu=True, update_data_interval=0)
+        qpos, qvel = solver._cpu.batch.bind("qpos"), solver._cpu.batch.bind("qvel")
+        # Without per-step synchronization, each world still starts from its own initial state.
+        np.testing.assert_allclose(qpos[:, 0], (0.0, 2.0))
         state = self.model.state()
         flags = StateFlags.JOINT_Q | StateFlags.JOINT_QD
         coords_per_world = self.model.joint_coord_count // self.model.world_count
@@ -161,10 +154,9 @@ class TestMuJoCoReset(unittest.TestCase):
                 joint_qd_before = np.arange(self.model.joint_dof_count, dtype=np.float32) + 40.0
                 state.joint_q.assign(joint_q_before)
                 state.joint_qd.assign(joint_qd_before)
-                solver.mj_data.qpos[:] = np.arange(solver.mj_data.qpos.size) + 10.0
-                solver.mj_data.qvel[:] = np.arange(solver.mj_data.qvel.size) + 20.0
-                qpos_before = solver.mj_data.qpos.copy()
-                qvel_before = solver.mj_data.qvel.copy()
+                qpos[:] = np.arange(qpos.shape[1]) + 10.0
+                qvel[:] = np.arange(qvel.shape[1]) + 20.0
+                qpos_before, qvel_before = qpos.copy(), qvel.copy()
 
                 solver.reset(
                     state,
@@ -172,15 +164,62 @@ class TestMuJoCoReset(unittest.TestCase):
                     flags=flags,
                 )
 
-                np.testing.assert_array_equal(solver.mj_data.qpos, qpos_before)
-                np.testing.assert_array_equal(solver.mj_data.qvel, qvel_before)
+                np.testing.assert_array_equal(qpos[0], qpos_before[0])
+                np.testing.assert_array_equal(qvel[0], qvel_before[0])
                 expected_q = joint_q_before.copy()
                 expected_qd = joint_qd_before.copy()
                 if mask_values[1]:
                     expected_q[coords_per_world:] = default_q[coords_per_world:]
                     expected_qd[dofs_per_world:] = default_qd[dofs_per_world:]
+                    # Free-joint position, wxyz rotation, and hinge angle of world 1's default pose.
+                    np.testing.assert_allclose(qpos[1], (2.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0), atol=1.0e-6)
+                    np.testing.assert_array_equal(qvel[1], 0.0)
+                else:
+                    np.testing.assert_array_equal(qpos[1], qpos_before[1])
+                    np.testing.assert_array_equal(qvel[1], qvel_before[1])
                 np.testing.assert_array_equal(state.joint_q.numpy(), expected_q)
                 np.testing.assert_array_equal(state.joint_qd.numpy(), expected_qd)
+
+    def test_native_cpu_masked_reset_resumes_selected_world(self):
+        """Restart one world from the model defaults while the other continues undisturbed."""
+        self.model = _build_two_world_model(world_count=2)
+        joint_q = self.model.joint_q.numpy()
+        coords_per_world = self.model.joint_coord_count // 2
+        joint_q[coords_per_world + 2] = 0.5  # World 1 starts lower than world 0.
+        self.model.joint_q.assign(joint_q)
+        solver = SolverMuJoCo(self.model, use_mujoco_cpu=True)
+        reference = SolverMuJoCo(self.model, use_mujoco_cpu=True)
+        control = self.model.control()
+        joint_f = control.joint_f.numpy()
+        joint_f[6::7] = 0.05  # Drive both revolute joints so the applied-force buffers are in use.
+        control.joint_f.assign(joint_f)
+
+        def step(target, state_0, state_1, steps):
+            for _ in range(steps):
+                target.step(state_0, state_1, control, None, 0.002)
+                state_0, state_1 = state_1, state_0
+            return state_0, state_1
+
+        state_0, state_1 = step(solver, self.model.state(), self.model.state(), 20)
+        first = state_0.joint_q.numpy().reshape(2, coords_per_world).copy()
+        defaults = self.model.joint_q.numpy().reshape(2, coords_per_world)
+        self.assertGreater(np.abs(first - defaults).max(axis=1).min(), 1.0e-3)  # Both worlds advanced.
+        warmstart = solver._cpu.batch.bind("qacc_warmstart")
+        before = warmstart.copy()
+        self.assertGreater(np.abs(before[0]).max(), 0.0)
+
+        solver.reset(state_0, world_mask=wp.array((False, True, False), dtype=wp.bool, device=self.model.device))
+        np.testing.assert_array_equal(warmstart[0], before[0])
+        np.testing.assert_array_equal(warmstart[1], 0.0)
+        np.testing.assert_array_equal(state_0.joint_q.numpy().reshape(2, coords_per_world)[0], first[0])
+        state_0, _ = step(solver, state_0, state_1, 20)
+
+        # World 0 matches an uninterrupted run; world 1 matches a fresh run from the defaults.
+        uninterrupted, _ = step(reference, self.model.state(), self.model.state(), 40)
+        restarted, _ = step(SolverMuJoCo(self.model, use_mujoco_cpu=True), self.model.state(), self.model.state(), 20)
+        joint_q = state_0.joint_q.numpy().reshape(2, coords_per_world)
+        np.testing.assert_allclose(joint_q[0], uninterrupted.joint_q.numpy().reshape(2, coords_per_world)[0], atol=1e-6)
+        np.testing.assert_allclose(joint_q[1], restarted.joint_q.numpy().reshape(2, coords_per_world)[1], atol=1e-6)
 
     def test_reset_all_worlds(self):
         """A ``None`` mask clears every world."""
@@ -284,7 +323,7 @@ class TestMuJoCoReset(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
 
         # Capture the same conversion path reset uses, then distinguish worlds.
-        solver._update_mjc_data(solver.mjw_data, model, state)
+        solver._update_mjc_data(model, state)
         qpos_synced = solver.mjw_data.qpos.numpy().copy()
         poisoned = qpos_synced + np.array(((10.0,), (20.0,)), dtype=np.float32)
         solver.mjw_data.qpos.assign(poisoned)
