@@ -1175,13 +1175,13 @@ first world in double precision.
     period, as may Warp's CPU graph capture.
 
 A captured step records its timestep and runs MuJoCo from the graph, on the
-batch's threads. A replay could not repeat host work, so the following raise
-during a capture: steps that export contacts or request contact, body, or
-friction-loss observables, updates of selected worlds,
-:meth:`~newton.solvers.SolverMuJoCo.reset`, and
-:meth:`~newton.solvers.SolverMuJoCo.notify_model_changed`. The ``QFRC_ACTUATOR``,
-``QFRC_BIAS``, and ``QFRC_CONSTRAINT`` observables can be captured. Model changes
-made between replays take effect.
+batch's threads, and a captured
+:meth:`~newton.solvers.SolverMuJoCo.notify_model_changed` applies the model as it
+is at each replay. The following host work is not recorded and raises during a
+capture: steps that export contacts or request contact, body, or friction-loss
+observables, updates of selected worlds, and
+:meth:`~newton.solvers.SolverMuJoCo.reset`. The ``QFRC_ACTUATOR``, ``QFRC_BIAS``,
+and ``QFRC_CONSTRAINT`` observables can be captured.
 
 A failure of MuJoCo during a replay is raised by :func:`warp.capture_launch`.
 ``solver.mj_model`` and ``solver.mj_data`` are updated when they are next read.

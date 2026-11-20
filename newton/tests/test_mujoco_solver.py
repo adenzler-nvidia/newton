@@ -51,6 +51,27 @@ from newton.tests.unittest_utils import (
     requires,
 )
 
+# Two hinged bodies with a site, a contact pair, a connect constraint, a fixed tendon, and a damped actuator.
+_MODEL_UPDATE_MJCF = """
+<mujoco>
+  <worldbody>
+    <body name="a" pos="0 0 1">
+      <joint name="ja" type="hinge" range="-1 1"/>
+      <geom name="ga" type="capsule" size="0.05 0.2"/>
+      <site name="sa" pos="0 0 0.2" size="0.02"/>
+    </body>
+    <body name="b" pos="0.4 0 1">
+      <joint name="jb" type="hinge" range="-1 1"/>
+      <geom name="gb" type="sphere" size="0.08"/>
+    </body>
+  </worldbody>
+  <contact><pair geom1="ga" geom2="gb"/></contact>
+  <equality><connect body1="a" body2="b" anchor="0.2 0 1"/></equality>
+  <tendon><fixed name="t"><joint joint="ja" coef="1"/><joint joint="jb" coef="-1"/></fixed></tendon>
+  <actuator><general name="u" joint="ja" gainprm="1" damping="0.4"/></actuator>
+</mujoco>
+"""
+
 
 def _add_deprecated_mimic_constraint(
     builder: newton.ModelBuilder,
@@ -1258,26 +1279,7 @@ class TestMuJoCoSolverGraphCapture(unittest.TestCase):
         if not wp.is_mempool_enabled(device):
             self.skipTest("CUDA graph capture requires the CUDA mempool allocator")
 
-        mjcf = """
-        <mujoco>
-          <worldbody>
-            <body name="a" pos="0 0 1">
-              <joint name="ja" type="hinge" range="-1 1"/>
-              <geom name="ga" type="capsule" size="0.05 0.2"/>
-              <site name="sa" pos="0 0 0.2" size="0.02"/>
-            </body>
-            <body name="b" pos="0.4 0 1">
-              <joint name="jb" type="hinge" range="-1 1"/>
-              <geom name="gb" type="sphere" size="0.08"/>
-            </body>
-          </worldbody>
-          <contact><pair geom1="ga" geom2="gb"/></contact>
-          <equality><connect body1="a" body2="b" anchor="0.2 0 1"/></equality>
-          <tendon><fixed name="t"><joint joint="ja" coef="1"/><joint joint="jb" coef="-1"/></fixed></tendon>
-          <actuator><general name="u" joint="ja" gainprm="1" damping="0.4"/></actuator>
-        </mujoco>
-        """
-
+        mjcf = _MODEL_UPDATE_MJCF
         world_count = 2
 
         def per_world(values, count):
@@ -16234,6 +16236,100 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
         solver.step(state_0, state_1, control, None, 0.004)
         self.assertAlmostEqual(solver.mj_data.time, 50 * sum(timesteps) + 0.004, places=9)
 
+    def test_cpu_graph_replays_model_changes(self):
+        """Replay ``notify_model_changed`` and steps from a graph as notifying and stepping directly does."""
+        with wp.ScopedDevice("cpu"):
+            model = self._build_model()
+        self._randomize(model, seed=1)
+        solvers = [SolverMuJoCo(model, use_mujoco_cpu=True) for _ in range(2)]
+        states = []
+        for _ in solvers:
+            state_0, state_1, control = model.state(), model.state(), model.control()
+            target = control.joint_target_q.numpy().reshape(model.world_count, -1)
+            target[:, -1] = 0.6
+            control.joint_target_q.assign(target.reshape(-1))
+            states.append((state_0, state_1, control))
+
+        def update(solver, state_0, state_1, control):
+            solver.notify_model_changed(ModelFlags.ALL)
+            solver.step(state_0, state_1, control, None, 0.002)
+            solver.step(state_1, state_0, control, None, 0.002)
+
+        direct, replayed = solvers
+        with wp.ScopedCapture(device="cpu") as capture:
+            update(replayed, *states[1])
+
+        for seed in (2, 3):
+            self._randomize(model, seed=seed)
+            update(direct, *states[0])
+            wp.capture_launch(capture.graph)
+            for name in _MJW_BATCHED_MODEL_FIELDS:
+                with self.subTest(seed=seed, field=name):
+                    np.testing.assert_array_equal(replayed._cpu.model_field(name), direct._cpu.model_field(name))
+            np.testing.assert_array_equal(states[1][0].joint_q.numpy(), states[0][0].joint_q.numpy())
+        self.assertGreater(np.ptp(direct._cpu.model_field("body_mass")[:, 1]), 1.0e-3)
+
+    def test_cpu_graph_replays_kinematic_and_actuator_changes(self):
+        """Replay a notification for roots that switch between kinematic and dynamic and for a damped actuator."""
+        world_count = 2
+        template = newton.ModelBuilder()
+        # MuJoCo resolves a damping ratio from each world's inertia, which the CPU backend does natively.
+        general = '<general name="u" joint="ja" gainprm="1" damping="0.4"/>'
+        self.assertIn(general, _MODEL_UPDATE_MJCF)
+        mjcf = _MODEL_UPDATE_MJCF.replace(general, '<position name="u" joint="ja" kp="100" dampratio="0.5"/>')
+        template.add_mjcf(mjcf, ctrl_direct=True)
+        builder = newton.ModelBuilder()
+        SolverMuJoCo.register_custom_attributes(builder)
+        builder.replicate(template, world_count)
+        model = builder.finalize(device="cpu")
+        kinematic, dynamic = int(BodyFlags.KINEMATIC), int(BodyFlags.DYNAMIC)
+        # Roots start kinematic so that they can switch later.
+        model.body_flags.fill_(kinematic)
+        direct, replayed = (
+            SolverMuJoCo(
+                model, use_mujoco_cpu=True, disable_contacts=True, iterations=1, kinematic_switchable_roots=False
+            )
+            for _ in range(2)
+        )
+        self.assertTrue(direct._dampratio_actuators)
+        with wp.ScopedCapture(device="cpu") as capture:
+            replayed.notify_model_changed(ModelFlags.ALL)
+
+        def per_world(values, count):
+            return np.repeat(np.asarray(values), count // world_count, axis=0)
+
+        mass, inertia = model.body_mass.numpy(), model.body_inertia.numpy()
+        for flags, gain, heavier in (
+            ([kinematic, dynamic], [200.0, 700.0], [1.0, 2.0]),
+            ([dynamic, kinematic], [300.0, 50.0], [3.0, 1.5]),
+            ([dynamic] * 2, [100.0, 400.0], [0.5, 1.0]),
+        ):
+            model.body_flags.assign(per_world(flags, model.body_count).astype(np.int32))
+            factor = per_world(np.array(heavier, dtype=np.float32), model.body_count)
+            model.body_mass.assign(mass * factor)
+            model.body_inertia.assign(inertia * factor[:, None, None])
+            # A position actuator keeps its damping ratio while its bias is the negative of its gain.
+            gainprm, biasprm = model.mujoco.actuator_gainprm.numpy(), model.mujoco.actuator_biasprm.numpy()
+            gainprm[:, 0] = per_world(np.array(gain, dtype=np.float32), gainprm.shape[0])
+            biasprm[:, 1] = -gainprm[:, 0]
+            model.mujoco.actuator_gainprm.assign(gainprm)
+            model.mujoco.actuator_biasprm.assign(biasprm)
+            direct.notify_model_changed(ModelFlags.ALL)
+            wp.capture_launch(capture.graph)
+            for name in _MJW_BATCHED_MODEL_FIELDS:
+                with self.subTest(flags=flags, field=name):
+                    np.testing.assert_allclose(
+                        replayed._cpu.model_field(name), direct._cpu.model_field(name), rtol=1.0e-5, atol=1.0e-7
+                    )
+            for name in ("dof_invweight0", "body_invweight0", "actuator_acc0"):
+                with self.subTest(flags=flags, field=name):
+                    np.testing.assert_allclose(
+                        getattr(replayed.mjw_model, name).numpy(), getattr(direct.mjw_model, name).numpy(), rtol=1.0e-5
+                    )
+            np.testing.assert_array_equal(replayed.mjw_data.eq_active.numpy(), direct.mjw_data.eq_active.numpy())
+            # The damping ratio is resolved into a damping in every world.
+            self.assertLess(replayed._cpu.model_field("actuator_biasprm")[:, 0, 2].max(), 0.0)
+
     def test_cpu_graph_allows_mujoco_callback_to_read_native_handles(self):
         """Let a MuJoCo callback read the solver's native handles while a replay runs the batch."""
         _, solver, state_0, state_1, control = self._cpu_stepping()
@@ -16296,12 +16392,12 @@ class TestMuJoCoCPUWorlds(unittest.TestCase):
 
         contacts = newton.Contacts(solver.get_max_contact_count(), 0, device=model.device)
         observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
-        with self.assertRaisesRegex(RuntimeError, "only replay plain steps"):
+        with self.assertRaisesRegex(RuntimeError, "only replay steps and model changes"):
             with wp.ScopedCapture(device="cpu"):
                 solver.step(state_0, state_1, control, contacts, 0.002, observables=observables)
-        with self.assertRaisesRegex(RuntimeError, "only replay plain steps"):
+        with self.assertRaisesRegex(RuntimeError, "only replay steps and model changes"):
             with wp.ScopedCapture(device="cpu"):
-                solver.notify_model_changed(ModelFlags.BODY_INERTIAL_PROPERTIES)
+                solver.reset(state_0)
         # A saved graph would call a function of this process from another one.
         with wp.ScopedCapture(device="cpu", apic=True) as capture:
             solver.step(state_0, state_1, control, None, 0.002)

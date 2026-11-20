@@ -5947,8 +5947,6 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
         if self.use_mujoco_cpu:
-            if self._cpu is not None:
-                self._cpu.host_only()
             self._notify_model_changed(flags)
         else:
             with self._scoped_mujoco_warp_execution():
@@ -10344,7 +10342,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             if lock:
                 # Native MuJoCo's constants are cheap.
                 self._cpu.set_const()
-                self._physical_dof_M0.assign(self._cpu.model_field("dof_M0"))
+                self._cpu.pull_model_field("dof_M0", self._physical_dof_M0)
             return
 
         m, d = self.mjw_model, self.mjw_data

@@ -48,10 +48,9 @@ class _HostArrays:
             cached = self._views[id(array)] = (array, array.numpy())
         return cached[1]
 
-    def prepare(self, owner: Any, names: Iterable[str]) -> None:
-        """Create the views of ``owner``'s CPU arrays now; host work in a graph must not call Warp."""
-        for name in names:
-            array = getattr(owner, name)
+    def prepare(self, arrays: Iterable[wp.array]) -> None:
+        """Create the views of CPU arrays now; host work in a graph must not call Warp."""
+        for array in arrays:
             if array.device.is_cpu:
                 self.read(array)
 
@@ -152,8 +151,8 @@ class MuJoCoCPUBackend:
         """Reject a graph capture of host work that a replay could not repeat."""
         if self._device.is_capturing:
             raise RuntimeError(
-                "A graph can only replay plain steps of the MuJoCo CPU backend, with the model on the CPU device. "
-                "Capture steps without contact export, observables, masked updates, and model changes."
+                "A graph can only replay steps and model changes of the MuJoCo CPU backend, with the model on the "
+                "CPU device. Capture them without contact export, observables, resets, and masked updates."
             )
         self.show_replayed()
 
@@ -199,13 +198,16 @@ class MuJoCoCPUBackend:
 
     def set_const(self) -> None:
         """Recompute the model constants of the worlds whose model changed and read the ones Newton's kernels use."""
-        self.host_only()
         self.flush()
+        self._host.prepare(getattr(self._mjw_model, name) for name in _SET_CONST_FIELDS)
+        self._issue(self._set_const)
+
+    def _set_const(self) -> None:
         if self._const_stale.any():
             self.batch.set_const(np.flatnonzero(self._const_stale))
             self._const_stale[:] = False
             self._model_changed()
-        self.pull_model(_SET_CONST_FIELDS)
+        self._pull_model(_SET_CONST_FIELDS)
 
     def _scratch_data(self) -> Any:
         if self._scratch is None:
@@ -226,6 +228,9 @@ class MuJoCoCPUBackend:
             models: Whether the models are needed; otherwise ``None`` is yielded in their place.
         """
         self.host_only()
+        return self._worlds(models)
+
+    def _worlds(self, models: bool = True) -> Iterator[tuple[Any, Any]]:
         if models and self._scratch_model is None:
             self._scratch_model = copy.copy(self._model)
         data = self._scratch_data()
@@ -251,6 +256,14 @@ class MuJoCoCPUBackend:
             field = self._fields[name] = self.batch.expand(name)
         return field
 
+    def pull_model_field(self, name: str, target: wp.array) -> None:
+        """Copy a native model field of every world to ``target``."""
+        self._host.prepare((target,))
+        self._issue(self._pull_model_field, name, target)
+
+    def _pull_model_field(self, name: str, target: wp.array) -> None:
+        self._host.write(target, self.model_field(name))
+
     def option(self, name: str) -> np.ndarray:
         """Return the native values of an ``MjOption`` field of every world, shape ``[nworld, ...]``."""
         return self.model_field(f"opt.{name}")
@@ -258,7 +271,7 @@ class MuJoCoCPUBackend:
     def mark_model(self, names: Iterable[str]) -> None:
         """Note MuJoCo Warp model fields that are about to be written."""
         names = tuple(names)
-        self._host.prepare(self._mjw_model, names)
+        self._host.prepare(getattr(self._mjw_model, name) for name in names)
         self._issue(self._snapshot_model, names)
 
     def _snapshot_model(self, names: Sequence[str]) -> None:
@@ -292,7 +305,7 @@ class MuJoCoCPUBackend:
             self._const_stale |= np.broadcast_to(changed, native.shape).reshape(self.nworld, -1).any(axis=1)
         return True
 
-    def pull_model(self, names: Iterable[str]) -> None:
+    def _pull_model(self, names: Iterable[str]) -> None:
         """Copy native model fields of every world to the MuJoCo Warp model."""
         for name in names:
             native = self.model_field(name)
@@ -312,7 +325,7 @@ class MuJoCoCPUBackend:
     def _data_fields(self, names: Iterable[str]) -> list[tuple[wp.array, np.ndarray]]:
         """Return the MuJoCo Warp array and the native values of every data field that is not empty."""
         names = tuple(names)
-        self._host.prepare(self._mjw_data, names)
+        self._host.prepare(getattr(self._mjw_data, name) for name in names)
         fields = ((getattr(self._mjw_data, name), self.batch.bind(name)) for name in names)
         return [(array, native) for array, native in fields if native.size]
 
@@ -341,8 +354,13 @@ class MuJoCoCPUBackend:
             self._host.write(getattr(self._mjw_data, name), value)
 
     def set_options(self, options: dict[str, np.ndarray]) -> None:
-        """Set ``MjOption`` fields from one value per world, or a single value shared by all worlds."""
-        self.host_only()
+        """Set ``MjOption`` fields from one value per world, or a single value shared by all worlds.
+
+        A graph replay reads the values again, which views of CPU arrays show as they are then.
+        """
+        self._issue(self._set_options, options)
+
+    def _set_options(self, options: dict[str, np.ndarray]) -> None:
         for name, option in options.items():
             current = self.option(name)
             values = np.broadcast_to(option, current.shape)
@@ -380,14 +398,19 @@ class MuJoCoCPUBackend:
         Args:
             actuators: MuJoCo actuators to resolve.
             dampratio: Damping ratio per world and actuator, shape ``[nworld or 1, nu]``; non-positive entries are skipped.
+                A graph replay reads the values again, which a view of a CPU array shows as they are then.
         """
+        self.flush()
+        self._host.prepare((self._mjw_model.actuator_biasprm,))
+        self._issue(self._resolve_dampratio, actuators, dampratio)
+
+    def _resolve_dampratio(self, actuators: Sequence[int], dampratio: np.ndarray) -> None:
         mujoco = self._mujoco
         dampratio = np.broadcast_to(dampratio, (self.nworld, dampratio.shape[1]))
         if not np.any(dampratio[:, list(actuators)] > 0.0):
             return
-        self.flush()
         biasprm = self.model_field("actuator_biasprm")
-        for world, ((m, d), ratio) in enumerate(zip(self.worlds(), dampratio, strict=True)):
+        for world, ((m, d), ratio) in enumerate(zip(self._worlds(), dampratio, strict=True)):
             selected = [a for a in actuators if ratio[a] > 0.0]
             if not selected:
                 continue
@@ -416,7 +439,7 @@ class MuJoCoCPUBackend:
                     -ratio[actuator] * 2.0 * np.sqrt(m.actuator_gainprm[actuator, 0] * inertia)
                 )
         self._model_changed()
-        self.pull_model(("actuator_biasprm",))
+        self._pull_model(("actuator_biasprm",))
 
     def frictionloss_force(self) -> np.ndarray:
         """Return the DOF friction-loss constraint forces of every world, shape ``[nworld, nv]``."""
